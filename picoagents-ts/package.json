@@ -1,0 +1,68 @@
+{
+  "name": "picoagents-ts",
+  "version": "0.1.0",
+  "description": "TypeScript implementation of the PicoAgents core runtime.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./agents": {
+      "types": "./dist/agents/index.d.ts",
+      "import": "./dist/agents/index.js"
+    },
+    "./llm": {
+      "types": "./dist/llm/index.d.ts",
+      "import": "./dist/llm/index.js"
+    },
+    "./memory": {
+      "types": "./dist/memory/index.d.ts",
+      "import": "./dist/memory/index.js"
+    },
+    "./orchestration": {
+      "types": "./dist/orchestration/index.d.ts",
+      "import": "./dist/orchestration/index.js"
+    },
+    "./webui": {
+      "types": "./dist/webui/index.d.ts",
+      "import": "./dist/webui/index.js"
+    },
+    "./termination": {
+      "types": "./dist/termination/index.d.ts",
+      "import": "./dist/termination/index.js"
+    },
+    "./tools": {
+      "types": "./dist/tools/index.d.ts",
+      "import": "./dist/tools/index.js"
+    },
+    "./workflow": {
+      "types": "./dist/workflow/index.d.ts",
+      "import": "./dist/workflow/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node scripts/copy-webui-assets.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test tests/*.test.mjs"
+  },
+  "bin": {
+    "picoagentsui-ts": "./dist/webui/cli.js"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.21"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "typescript": "^5.8.3"
+  }
+}

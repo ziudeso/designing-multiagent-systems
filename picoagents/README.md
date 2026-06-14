@@ -51,6 +51,9 @@ PicoAgents implements complete, working examples of:
 - **Tools** - 15+ built-in tools (file ops, code execution, web search, planning)
 - **Evaluation** - LLM-as-judge patterns, reference-based validation, metrics
 - **Web UI** - Auto-discovery, streaming chat, session management
+- **LLM Clients** - OpenAI, Azure OpenAI, and Anthropic with a unified async interface, streaming, tool calling, structured (Pydantic) outputs, and multimodal messages
+- **Memory** - In-memory list, file-based JSON persistence, and ChromaDB vector stores (persistent/HTTP) with text and semantic search, querying, and context retrieval
+- **Termination** - Max-message, text-mention, token-usage, timeout, handoff, function-call, external-signal, and cancellation conditions, composable with AND/OR logic
 
 ## Project Structure
 
@@ -63,7 +66,7 @@ picoagents/
 │   ├── tools/             # Tool system and built-in tools
 │   ├── eval/              # Evaluation framework (Ch 8)
 │   ├── webui/             # Web interface with auto-discovery
-│   ├── llm/               # LLM clients (OpenAI, Azure)
+│   ├── llm/               # LLM clients (OpenAI, Azure, Anthropic)
 │   ├── memory/            # Memory implementations
 │   └── termination/       # Termination conditions
 └── tests/                 # Comprehensive test suite
