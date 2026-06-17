@@ -27,6 +27,10 @@ function shouldCaptureContent(): boolean {
   );
 }
 
+function areMetricsEnabled(): boolean {
+  return ["true", "1", "yes"].includes((process.env.OTEL_METRICS_ENABLED ?? "false").toLowerCase());
+}
+
 /** Lazily load `@opentelemetry/api` without a static dependency. */
 async function loadOtelApi(): Promise<any | null> {
   try {
@@ -47,6 +51,8 @@ export class OTelMiddleware extends BaseMiddleware {
   private enabled: boolean;
   private captureContent: boolean;
   private tracer: any = null;
+  private tokenHistogram: any = null;
+  private durationHistogram: any = null;
   private ready: Promise<void>;
 
   constructor() {
@@ -66,6 +72,23 @@ export class OTelMiddleware extends BaseMiddleware {
       this.tracer = otel.trace.getTracer("picoagents");
     } catch {
       this.enabled = false;
+      return;
+    }
+    if (areMetricsEnabled()) {
+      try {
+        const meter = otel.metrics?.getMeter?.("picoagents");
+        this.tokenHistogram = meter?.createHistogram?.("gen_ai.client.token.usage", {
+          unit: "{token}",
+          description: "Number of tokens used in operation"
+        });
+        this.durationHistogram = meter?.createHistogram?.("gen_ai.client.operation.duration", {
+          unit: "s",
+          description: "Duration of AI operation"
+        });
+      } catch {
+        this.tokenHistogram = null;
+        this.durationHistogram = null;
+      }
     }
   }
 
@@ -126,10 +149,22 @@ export class OTelMiddleware extends BaseMiddleware {
       return;
     }
     try {
+      const start = (context.metadata._otelStart as number | undefined) ?? Date.now();
+      const durationSeconds = Math.max(0, (Date.now() - start) / 1000);
+      this.durationHistogram?.record?.(durationSeconds, {
+        "gen_ai.operation.name": context.operation
+      });
+
       const usage = (result as { usage?: { tokensInput?: number; tokensOutput?: number } })?.usage;
       if (context.operation === "model_call" && usage) {
-        if (usage.tokensInput !== undefined) span.setAttribute("gen_ai.usage.input_tokens", usage.tokensInput);
-        if (usage.tokensOutput !== undefined) span.setAttribute("gen_ai.usage.output_tokens", usage.tokensOutput);
+        if (usage.tokensInput !== undefined) {
+          span.setAttribute("gen_ai.usage.input_tokens", usage.tokensInput);
+          this.recordTokenUsage(usage.tokensInput, "input", context.operation);
+        }
+        if (usage.tokensOutput !== undefined) {
+          span.setAttribute("gen_ai.usage.output_tokens", usage.tokensOutput);
+          this.recordTokenUsage(usage.tokensOutput, "output", context.operation);
+        }
       } else if (context.operation === "tool_call") {
         const success = (result as { success?: boolean })?.success;
         if (success !== undefined) span.setAttribute("gen_ai.tool.success", success);
@@ -167,6 +202,14 @@ export class OTelMiddleware extends BaseMiddleware {
   private getToolName(context: MiddlewareContext): string {
     const data = context.data as { toolName?: string } | undefined;
     return data?.toolName ?? "unknown";
+  }
+
+  private recordTokenUsage(tokens: number, tokenType: "input" | "output", operation: string): void {
+    if (!Number.isFinite(tokens)) return;
+    this.tokenHistogram?.record?.(tokens, {
+      "gen_ai.token.type": tokenType,
+      "gen_ai.operation.name": operation
+    });
   }
 
   private formatMessages(messages: Array<{ content?: string; source?: string }>): unknown[] {

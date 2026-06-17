@@ -16,17 +16,21 @@ export {
   createCoreTools
 } from "./coreTools.js";
 export {
+  ArxivSearchTool,
   ExtractTextTool,
   GoogleSearchTool,
   WebFetchTool,
   WebSearchTool,
+  YouTubeCaptionTool,
   createResearchTools
 } from "./researchTools.js";
 export type {
+  ArxivSearchToolOptions,
   DomainFilterOptions,
   GoogleSearchToolOptions,
   WebFetchToolOptions,
-  WebSearchToolOptions
+  WebSearchToolOptions,
+  YouTubeCaptionToolOptions
 } from "./researchTools.js";
 export {
   BashExecuteTool,

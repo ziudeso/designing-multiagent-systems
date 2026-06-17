@@ -1,19 +1,26 @@
 import { BaseAgent } from "../agents/index.js";
+import { dumpComponent, loadComponent, registerComponent } from "../componentConfig.js";
+import type { ComponentModel, ComponentType } from "../componentConfig.js";
 import { BaseChatCompletionClient, StructuredOutputFormat } from "../llm/index.js";
 import { Message, UserMessage } from "../messages.js";
 import { AgentResponse, StopMessage } from "../types.js";
-import { BaseOrchestrator, BaseOrchestratorOptions } from "./base.js";
+import {
+  BaseOrchestrator,
+  BaseOrchestratorOptions,
+  loadBaseOrchestratorOptions,
+  serializeBaseOrchestratorConfig
+} from "./base.js";
 
 export interface StepProgressEvaluation {
-  step_completed: boolean;
-  failure_reason: string;
-  confidence_score: number;
-  suggested_improvements: string[];
+  stepCompleted: boolean;
+  failureReason: string;
+  confidenceScore: number;
+  suggestedImprovements: string[];
 }
 
 export interface PlanStep {
   task: string;
-  agent_name: string;
+  agentName: string;
   reasoning: string;
 }
 
@@ -37,10 +44,10 @@ const executionPlanFormat: StructuredOutputFormat = {
           type: "object",
           properties: {
             task: { type: "string" },
-            agent_name: { type: "string" },
+            agentName: { type: "string" },
             reasoning: { type: "string" }
           },
-          required: ["task", "agent_name", "reasoning"]
+          required: ["task", "agentName", "reasoning"]
         }
       }
     },
@@ -53,19 +60,23 @@ const stepProgressEvaluationFormat: StructuredOutputFormat = {
   schema: {
     type: "object",
     properties: {
-      step_completed: { type: "boolean" },
-      failure_reason: { type: "string" },
-      confidence_score: { type: "number" },
-      suggested_improvements: {
+      stepCompleted: { type: "boolean" },
+      failureReason: { type: "string" },
+      confidenceScore: { type: "number" },
+      suggestedImprovements: {
         type: "array",
         items: { type: "string" }
       }
     },
-    required: ["step_completed", "failure_reason", "confidence_score", "suggested_improvements"]
+    required: ["stepCompleted", "failureReason", "confidenceScore", "suggestedImprovements"]
   }
 };
 
 export class PlanBasedOrchestrator extends BaseOrchestrator {
+  static componentType: ComponentType = "orchestrator";
+  static componentProvider = "picoagents.orchestration.PlanBasedOrchestrator";
+  static componentVersion = 1;
+
   modelClient: BaseChatCompletionClient;
   maxStepRetries: number;
   executionPlan?: ExecutionPlan;
@@ -83,6 +94,22 @@ export class PlanBasedOrchestrator extends BaseOrchestrator {
     this.maxStepRetries = options.maxStepRetries ?? 3;
   }
 
+  static fromConfig(config: Record<string, unknown> = {}): PlanBasedOrchestrator {
+    return new PlanBasedOrchestrator({
+      ...loadBaseOrchestratorOptions(config),
+      modelClient: loadComponent((config.modelClient ?? config.model_client) as ComponentModel) as unknown as BaseChatCompletionClient,
+      maxStepRetries: numberOrUndefined(config.maxStepRetries ?? config.max_step_retries)
+    });
+  }
+
+  toConfig(): Record<string, unknown> {
+    return {
+      ...serializeBaseOrchestratorConfig(this),
+      modelClient: dumpComponent(this.modelClient as unknown as { toConfig(): Record<string, unknown> }),
+      maxStepRetries: this.maxStepRetries
+    };
+  }
+
   async selectNextAgent(): Promise<BaseAgent> {
     if (!this.executionPlan) {
       if (!this.sharedMessages.length) throw new Error("No initial task found to create plan");
@@ -95,7 +122,7 @@ export class PlanBasedOrchestrator extends BaseOrchestrator {
     }
 
     const currentStep = this.executionPlan.steps[this.currentStepIndex]!;
-    return this.findAgentByName(currentStep.agent_name);
+    return this.findAgentByName(currentStep.agentName);
   }
 
   async prepareContextForAgent(_agent: BaseAgent): Promise<string | UserMessage | Message[]> {
@@ -126,7 +153,7 @@ export class PlanBasedOrchestrator extends BaseOrchestrator {
     const currentStep = this.executionPlan.steps[this.currentStepIndex]!;
     const progress = await this.evaluateStepProgress(currentStep, result);
 
-    if (progress.step_completed) {
+    if (progress.stepCompleted) {
       this.stepResults[this.currentStepIndex] = result;
       this.currentStepIndex += 1;
       this.currentStepRetryCount = 0;
@@ -165,11 +192,14 @@ Keep it simple and focused.`;
       const plan = result.structuredOutput as Partial<ExecutionPlan> | undefined;
       if (plan?.steps?.length) {
         return {
-          steps: plan.steps.map((step) => ({
-            task: String(step.task),
-            agent_name: String(step.agent_name),
-            reasoning: String(step.reasoning)
-          }))
+          steps: plan.steps.map((step) => {
+            const raw = step as Partial<PlanStep> & { agent_name?: unknown };
+            return {
+              task: String(step.task),
+              agentName: String(raw.agentName ?? raw.agent_name),
+              reasoning: String(step.reasoning)
+            };
+          })
         };
       }
     } catch {
@@ -196,17 +226,17 @@ Keep it simple and focused.`;
 
     if (!agentOutput.trim()) {
       return {
-        step_completed: false,
-        failure_reason: "No meaningful output detected",
-        confidence_score: 0.9,
-        suggested_improvements: ["Provide more specific instructions", "Add examples of expected output"]
+        stepCompleted: false,
+        failureReason: "No meaningful output detected",
+        confidenceScore: 0.9,
+        suggestedImprovements: ["Provide more specific instructions", "Add examples of expected output"]
       };
     }
 
     const prompt = `Evaluate whether the following step was successfully completed based on the agent's output.
 
 Step Task: ${step.task}
-Expected Agent: ${step.agent_name}
+Expected Agent: ${step.agentName}
 Reasoning: ${step.reasoning}
 
 Agent's Output:
@@ -219,13 +249,21 @@ Evaluate whether the step task was completed, why it failed if not, confidence f
         [new UserMessage({ content: prompt, source: "step_evaluator" })],
         { outputFormat: stepProgressEvaluationFormat }
       );
-      const value = evalResult.structuredOutput as Partial<StepProgressEvaluation> | undefined;
-      if (value && typeof value.step_completed === "boolean") {
+      const value = evalResult.structuredOutput as (Partial<StepProgressEvaluation> & {
+        step_completed?: unknown;
+        failure_reason?: unknown;
+        confidence_score?: unknown;
+        suggested_improvements?: unknown;
+      }) | undefined;
+      const stepCompleted = value?.stepCompleted ?? value?.step_completed;
+      if (value && typeof stepCompleted === "boolean") {
+        const confidenceScore = value.confidenceScore ?? value.confidence_score;
+        const suggestedImprovements = value.suggestedImprovements ?? value.suggested_improvements;
         return {
-          step_completed: value.step_completed,
-          failure_reason: value.failure_reason ?? "None",
-          confidence_score: typeof value.confidence_score === "number" ? value.confidence_score : 0.5,
-          suggested_improvements: Array.isArray(value.suggested_improvements) ? value.suggested_improvements : []
+          stepCompleted,
+          failureReason: String(value.failureReason ?? value.failure_reason ?? "None"),
+          confidenceScore: typeof confidenceScore === "number" ? confidenceScore : 0.5,
+          suggestedImprovements: Array.isArray(suggestedImprovements) ? suggestedImprovements.map(String) : []
         };
       }
     } catch {
@@ -281,7 +319,7 @@ Evaluate whether the step task was completed, why it failed if not, confidence f
       steps: [
         {
           task: `Complete the task: ${task}`,
-          agent_name: this.agents[0]!.name,
+          agentName: this.agents[0]!.name,
           reasoning: "Single-step fallback plan"
         }
       ]
@@ -307,10 +345,10 @@ Evaluate whether the step task was completed, why it failed if not, confidence f
 
   private createRetryInstructions(progress: StepProgressEvaluation): string {
     const attempts = this.stepAttempts[this.currentStepIndex]?.length ?? 0;
-    const suggestions = progress.suggested_improvements.length
-      ? `\nSuggestions:\n${progress.suggested_improvements.map((item) => `- ${item}`).join("\n")}`
+    const suggestions = progress.suggestedImprovements.length
+      ? `\nSuggestions:\n${progress.suggestedImprovements.map((item) => `- ${item}`).join("\n")}`
       : "";
-    return `Previous attempt failed: ${progress.failure_reason || "Unknown reason"}\nThis is retry attempt ${attempts + 1}. Please try a different approach.${suggestions}`;
+    return `Previous attempt failed: ${progress.failureReason || "Unknown reason"}\nThis is retry attempt ${attempts + 1}. Please try a different approach.${suggestions}`;
   }
 
   private fallbackStepEvaluation(agentOutput: string): StepProgressEvaluation {
@@ -319,17 +357,25 @@ Evaluate whether the step task was completed, why it failed if not, confidence f
     const hasError = ["error", "failed", "cannot", "unable", "sorry"].some((word) => lower.includes(word));
     if (hasMeaningfulContent && !hasError) {
       return {
-        step_completed: true,
-        failure_reason: "None",
-        confidence_score: 0.7,
-        suggested_improvements: []
+        stepCompleted: true,
+        failureReason: "None",
+        confidenceScore: 0.7,
+        suggestedImprovements: []
       };
     }
     return {
-      step_completed: false,
-      failure_reason: "Output suggests task was not completed successfully",
-      confidence_score: 0.6,
-      suggested_improvements: ["Provide clearer instructions", "Break task into smaller parts", "Add specific examples"]
+      stepCompleted: false,
+      failureReason: "Output suggests task was not completed successfully",
+      confidenceScore: 0.6,
+      suggestedImprovements: ["Provide clearer instructions", "Break task into smaller parts", "Add specific examples"]
     };
   }
 }
+
+function numberOrUndefined(value: unknown): number | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+registerComponent(PlanBasedOrchestrator as any);

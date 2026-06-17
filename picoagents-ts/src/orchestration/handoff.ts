@@ -1,7 +1,14 @@
 import { BaseAgent } from "../agents/index.js";
+import { registerComponent } from "../componentConfig.js";
+import type { ComponentType } from "../componentConfig.js";
 import { AssistantMessage, Message } from "../messages.js";
 import { AgentResponse } from "../types.js";
-import { BaseOrchestrator, BaseOrchestratorOptions } from "./base.js";
+import {
+  BaseOrchestrator,
+  BaseOrchestratorOptions,
+  loadBaseOrchestratorOptions,
+  serializeBaseOrchestratorConfig
+} from "./base.js";
 
 export interface HandoffRequest {
   targetAgent: string;
@@ -10,11 +17,23 @@ export interface HandoffRequest {
 }
 
 export class HandoffOrchestrator extends BaseOrchestrator {
+  static componentType: ComponentType = "orchestrator";
+  static componentProvider = "picoagents.orchestration.HandoffOrchestrator";
+  static componentVersion = 1;
+
   private currentAgentIndex = 0;
   handoffHistory: HandoffRequest[] = [];
 
   constructor(options: BaseOrchestratorOptions) {
     super(options);
+  }
+
+  static fromConfig(config: Record<string, unknown> = {}): HandoffOrchestrator {
+    return new HandoffOrchestrator(loadBaseOrchestratorOptions(config));
+  }
+
+  toConfig(): Record<string, unknown> {
+    return serializeBaseOrchestratorConfig(this);
   }
 
   async selectNextAgent(): Promise<BaseAgent> {
@@ -100,6 +119,8 @@ It is now your turn.`;
     };
   }
 }
+
+registerComponent(HandoffOrchestrator as any);
 
 function extractReason(content: string, pattern: string): string {
   const index = content.toLowerCase().indexOf(pattern);

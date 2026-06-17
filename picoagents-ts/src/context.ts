@@ -142,9 +142,6 @@ export class AgentContext {
     this.messages = [];
     this.sharedState = {};
     this.metadata = {};
-    this.pendingApprovalRequests = [];
-    this.approvalResponses = {};
-    this.pendingToolCalls = {};
   }
 
   get messageCount(): number {

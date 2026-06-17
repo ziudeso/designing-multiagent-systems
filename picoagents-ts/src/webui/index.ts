@@ -15,6 +15,7 @@ import {
 export { PicoAgentsScanner } from "./discovery.js";
 export { EntityRegistry } from "./registry.js";
 export { ExecutionEngine } from "./execution.js";
+export { EvalJobManager } from "./evalJobs.js";
 export {
   CachedFileSessionStore,
   FileSessionStore,

@@ -1,12 +1,11 @@
 /**
  * Evaluation system for picoagents-ts.
  *
- * A framework for testing and comparing picoagents components (agents and
- * models). Mirrors the public API of the Python `picoagents.eval` package.
+ * A framework for testing and comparing picoagents components (agents, models,
+ * and orchestrators). Mirrors the public API of the Python
+ * `picoagents.eval` package.
  *
  * Notable omissions relative to the Python port (the TS port is a subset):
- * - `OrchestratorEvalTarget`: omitted because the TS port has no orchestration
- *   module to wrap.
  * - `CopilotTarget`: omitted (no GitHub Copilot SDK binding).
  *
  * @example
@@ -43,6 +42,7 @@ export {
   CallableTarget,
   ClaudeCodeTarget,
   ModelEvalTarget,
+  OrchestratorEvalTarget,
   PicoAgentTarget
 } from "./targets.js";
 export type { ClaudeCodeTargetOptions } from "./targets.js";

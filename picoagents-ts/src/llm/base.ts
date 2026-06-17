@@ -189,6 +189,81 @@ export function makeSchemaCompatible(schema: JSONSchema): JSONSchema {
   return copy;
 }
 
+export function parseStructuredOutput(
+  content: string,
+  outputFormat: StructuredOutputFormat
+): unknown | undefined {
+  try {
+    const parsed = JSON.parse(content);
+    return validateJsonSchema(parsed, outputFormat.schema) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function validateJsonSchema(value: unknown, schema: JSONSchema): boolean {
+  if (Array.isArray(schema.anyOf)) {
+    return schema.anyOf.some((candidate) => validateJsonSchema(value, candidate));
+  }
+
+  if (Array.isArray(schema.enum) && !schema.enum.some((allowed) => Object.is(allowed, value))) {
+    return false;
+  }
+
+  const rawType = schema.type;
+  if (Array.isArray(rawType)) {
+    return rawType.some((type) => validateJsonSchema(value, { ...schema, type }));
+  }
+
+  if (typeof rawType === "string" && !checkSchemaType(value, rawType)) {
+    return false;
+  }
+
+  if (rawType === "object" || (schema.properties && value && typeof value === "object" && !Array.isArray(value))) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+    const obj = value as Record<string, unknown>;
+    for (const field of schema.required ?? []) {
+      if (!(field in obj)) return false;
+    }
+    const properties = schema.properties ?? {};
+    for (const [field, fieldSchema] of Object.entries(properties)) {
+      if (field in obj && !validateJsonSchema(obj[field], fieldSchema)) return false;
+    }
+    if (schema.additionalProperties === false) {
+      for (const field of Object.keys(obj)) {
+        if (!(field in properties)) return false;
+      }
+    }
+  }
+
+  if (rawType === "array" && schema.items && Array.isArray(value)) {
+    return value.every((item) => validateJsonSchema(item, schema.items!));
+  }
+
+  return true;
+}
+
+function checkSchemaType(value: unknown, expected: string): boolean {
+  switch (expected) {
+    case "string":
+      return typeof value === "string";
+    case "integer":
+      return typeof value === "number" && Number.isInteger(value);
+    case "number":
+      return typeof value === "number" && Number.isFinite(value);
+    case "boolean":
+      return typeof value === "boolean";
+    case "array":
+      return Array.isArray(value);
+    case "object":
+      return value !== null && typeof value === "object" && !Array.isArray(value);
+    case "null":
+      return value === null;
+    default:
+      return true;
+  }
+}
+
 function safeJsonParse(value: string): Record<string, unknown> {
   try {
     const parsed = JSON.parse(value);

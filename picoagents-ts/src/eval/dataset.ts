@@ -53,14 +53,14 @@ export class Dataset {
       version: this.version,
       description: this.description,
       categories: this.categories,
-      default_eval_criteria: this.defaultEvalCriteria,
+      defaultEvalCriteria: this.defaultEvalCriteria,
       tasks: this.tasks.map((t) => ({
         id: t.id,
         name: t.name,
         input: t.input,
         category: t.category,
-        eval_criteria: t.evalCriteria,
-        expected_output: t.expectedOutput,
+        evalCriteria: t.evalCriteria,
+        expectedOutput: t.expectedOutput,
         rubric: t.rubric,
         metadata: t.metadata
       })),
@@ -115,7 +115,7 @@ export class Dataset {
       tasks: filtered,
       categories: [category],
       defaultEvalCriteria: this.defaultEvalCriteria,
-      metadata: { ...this.metadata, filtered_from: this.name }
+      metadata: { ...this.metadata, filteredFrom: this.name }
     });
   }
 
@@ -130,7 +130,7 @@ export class Dataset {
       tasks: filtered,
       categories: [...new Set(filtered.map((t) => t.category))],
       defaultEvalCriteria: this.defaultEvalCriteria,
-      metadata: { ...this.metadata, filtered_from: this.name }
+      metadata: { ...this.metadata, filteredFrom: this.name }
     });
   }
 
@@ -144,7 +144,7 @@ export class Dataset {
       tasks: filtered,
       categories: [...new Set(filtered.map((t) => t.category))],
       defaultEvalCriteria: this.defaultEvalCriteria,
-      metadata: { ...this.metadata, filtered_from: this.name }
+      metadata: { ...this.metadata, filteredFrom: this.name }
     });
   }
 

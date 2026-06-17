@@ -14,7 +14,8 @@ import {
   BaseChatCompletionError,
   InvalidRequestError,
   RateLimitError,
-  StructuredOutputFormat
+  StructuredOutputFormat,
+  parseStructuredOutput
 } from "./base.js";
 import { fetchWithRetries } from "./http.js";
 
@@ -86,12 +87,8 @@ export class AnthropicChatCompletionClient
   ): Promise<ChatCompletionResult> {
     const start = Date.now();
     const { tools, outputFormat, signal, ...requestOptions } = options;
-    if (outputFormat) {
-      // Structured output is not yet supported for the Anthropic client.
-      console.warn("Structured output is not yet supported in the Anthropic client");
-    }
 
-    const body = this.buildRequestBody(messages, tools, requestOptions);
+    const body = this.buildRequestBody(messages, tools, requestOptions, outputFormat);
 
     const json = await this.postJson(this.messagesUrl(), body, signal);
 
@@ -123,6 +120,11 @@ export class AnthropicChatCompletionClient
       costEstimate: usageData ? this.estimateCost(tokensInput, tokensOutput) : undefined
     });
 
+    let structuredOutput: unknown;
+    if (outputFormat && assistantContent.trim()) {
+      structuredOutput = parseStructuredOutput(assistantContent, outputFormat);
+    }
+
     return {
       message: new AssistantMessage({
         content: assistantContent,
@@ -132,7 +134,7 @@ export class AnthropicChatCompletionClient
       usage,
       model: json.model ?? this.model,
       finishReason: json.stop_reason ?? "stop",
-      structuredOutput: undefined
+      structuredOutput
     };
   }
 
@@ -145,10 +147,7 @@ export class AnthropicChatCompletionClient
       [key: string]: unknown;
     } = {}
   ): AsyncGenerator<ChatCompletionChunk> {
-    const { tools, outputFormat, signal, ...requestOptions } = options;
-    if (outputFormat) {
-      console.warn("Structured output is not yet supported in streaming mode");
-    }
+    const { tools, outputFormat: _outputFormat, signal, ...requestOptions } = options;
 
     const body = this.buildRequestBody(messages, tools, requestOptions);
     body.stream = true;
@@ -271,7 +270,8 @@ export class AnthropicChatCompletionClient
   protected buildRequestBody(
     messages: Message[],
     tools: Record<string, unknown>[] | undefined,
-    requestOptions: Record<string, unknown>
+    requestOptions: Record<string, unknown>,
+    outputFormat?: StructuredOutputFormat
   ): Record<string, unknown> {
     const { system, apiMessages } = this.convertMessagesToAnthropicFormat(messages);
 
@@ -285,6 +285,14 @@ export class AnthropicChatCompletionClient
     };
     if (system) body.system = system;
     if (tools?.length) body.tools = this.convertToolsToAnthropicFormat(tools);
+    if (outputFormat) {
+      body.output_config = {
+        format: {
+          type: "json_schema",
+          schema: makeAnthropicSchemaCompatible(outputFormat.schema)
+        }
+      };
+    }
     return body;
   }
 
@@ -432,6 +440,25 @@ export class AnthropicChatCompletionClient
 }
 
 registerComponent(AnthropicChatCompletionClient as any);
+
+function makeAnthropicSchemaCompatible(schema: unknown): unknown {
+  if (Array.isArray(schema)) {
+    return schema.map(makeAnthropicSchemaCompatible);
+  }
+  if (!schema || typeof schema !== "object") {
+    return schema;
+  }
+
+  const copy: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(schema as Record<string, unknown>)) {
+    copy[key] = makeAnthropicSchemaCompatible(value);
+  }
+
+  if (copy.type === "object") {
+    copy.additionalProperties = false;
+  }
+  return copy;
+}
 
 async function throwProviderError(response: Response): Promise<never> {
   const text = await response.text();

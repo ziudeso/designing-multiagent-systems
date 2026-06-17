@@ -1,0 +1,26 @@
+{
+  "name": "picoagents-ts-examples",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Runnable TypeScript examples for picoagents-ts.",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "example:basic-agent": "npm run build && node dist/agents/basic-agent.js",
+    "example:sequential-workflow": "npm run build && node dist/workflows/sequential.js",
+    "example:round-robin": "npm run build && node dist/orchestration/round-robin.js",
+    "example:evaluation": "npm run build && node dist/evaluation/reference-based-evaluation.js",
+    "example:webui": "npm run build && node dist/webui/in-memory.js"
+  },
+  "dependencies": {
+    "picoagents-ts": "file:../picoagents-ts"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3",
+    "@types/node": "^22.15.21"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

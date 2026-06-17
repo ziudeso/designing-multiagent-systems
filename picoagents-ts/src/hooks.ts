@@ -13,7 +13,17 @@ import { AgentContext } from "./context.js";
 import { Message, SystemMessage, UserMessage } from "./messages.js";
 
 /** Shared state passed to hooks during a single agent run. */
-export interface LoopContext {
+export interface LoopContextInit {
+  agentContext: AgentContext;
+  llmMessages: Message[];
+  agentName: string;
+  iteration?: number;
+  restartCount?: number;
+  metadata?: Record<string, unknown>;
+  modelClient?: { create(messages: Message[]): Promise<{ message: { content: string } }> };
+}
+
+export class LoopContext {
   agentContext: AgentContext;
   llmMessages: Message[];
   agentName: string;
@@ -21,6 +31,16 @@ export interface LoopContext {
   restartCount: number;
   metadata: Record<string, unknown>;
   modelClient?: { create(messages: Message[]): Promise<{ message: { content: string } }> };
+
+  constructor(init: LoopContextInit) {
+    this.agentContext = init.agentContext;
+    this.llmMessages = init.llmMessages;
+    this.agentName = init.agentName;
+    this.iteration = init.iteration ?? 0;
+    this.restartCount = init.restartCount ?? 0;
+    this.metadata = init.metadata ?? {};
+    this.modelClient = init.modelClient;
+  }
 }
 
 // ---------------------------------------------------------------------------

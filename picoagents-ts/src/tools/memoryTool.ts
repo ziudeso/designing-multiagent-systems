@@ -1,4 +1,4 @@
-import { promises as fs } from "node:fs";
+import fsSync, { promises as fs } from "node:fs";
 import path from "node:path";
 import { ApprovalMode, BaseTool, JSONSchema, ToolResult } from "./base.js";
 
@@ -7,6 +7,7 @@ export class MemoryBackend {
 
   constructor(basePath: string = "./memories") {
     this.basePath = path.resolve(basePath);
+    fsSync.mkdirSync(this.basePath, { recursive: true });
   }
 
   async ensureReady(): Promise<void> {
@@ -68,7 +69,7 @@ export class MemoryBackend {
     if (!content.includes(oldStr)) {
       throw new Error(`Text not found in file: '${oldStr.slice(0, 50)}'`);
     }
-    await fs.writeFile(fullPath, content.replace(oldStr, newStr), "utf8");
+    await fs.writeFile(fullPath, content.replace(oldStr, () => newStr), "utf8");
     return `File ${memoryPath} has been edited successfully`;
   }
 
@@ -99,6 +100,20 @@ export class MemoryBackend {
   async rename(oldPath: string, newPath: string): Promise<string> {
     const oldFullPath = this.validatePath(oldPath);
     const newFullPath = this.validatePath(newPath);
+    try {
+      await fs.stat(oldFullPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        throw new Error(`Source path does not exist: ${oldPath}`);
+      }
+      throw error;
+    }
+    try {
+      await fs.stat(newFullPath);
+      throw new Error(`Destination path already exists: ${newPath}`);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
     await fs.mkdir(path.dirname(newFullPath), { recursive: true });
     await fs.rename(oldFullPath, newFullPath);
     return `Renamed ${oldPath} to ${newPath}`;
@@ -177,10 +192,13 @@ export class MemoryTool extends BaseTool {
     const command = String(parameters.command ?? "");
     try {
       let result: string;
+      const metadata: Record<string, unknown> = { command };
       if (command === "view") {
         result = await this.backend.view(String(parameters.path ?? "/memories"), parameters.view_range as number[] | undefined);
       } else if (command === "create") {
-        result = await this.backend.create(String(parameters.path), String(parameters.file_text ?? ""));
+        const fileText = String(parameters.file_text ?? "");
+        result = await this.backend.create(String(parameters.path), fileText);
+        metadata.size = fileText.length;
       } else if (command === "str_replace") {
         result = await this.backend.strReplace(String(parameters.path), String(parameters.old_str ?? ""), String(parameters.new_str ?? ""));
       } else if (command === "insert") {
@@ -199,7 +217,7 @@ export class MemoryTool extends BaseTool {
       return new ToolResult({
         success: true,
         result,
-        metadata: { command }
+        metadata
       });
     } catch (error) {
       return new ToolResult({

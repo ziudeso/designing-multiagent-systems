@@ -10,24 +10,27 @@
  * 4. MultiEditTool - Atomic multi-edit for files
  *
  * Persistence uses Node `fs`/`path`/`os` under a `.picoagents` directory in the
- * current working directory (todos) and `~/.picoagents/skills` (user skills),
- * mirroring the Python implementation. Tool names and parameter schemas match
- * Python (snake_case, e.g. "todo_write"); internal metadata keys are camelCase.
+ * current working directory (todos) and `~/.picoagents/skills` (user skills).
+ * Tool names and parameter schemas stay snake_case because they are LLM-facing
+ * tool contracts; internal metadata keys are camelCase.
  */
 
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import type { BaseChatCompletionClient } from "../llm/index.js";
 import { BaseTool, JSONSchema, ToolResult } from "./base.js";
 import { ThinkTool } from "./coreTools.js";
 import { GrepSearchTool, ListDirectoryTool, ReadFileTool } from "./codingTools.js";
-import { WebFetchTool, WebSearchTool } from "./researchTools.js";
+import { ArxivSearchTool, WebFetchTool, WebSearchTool, YouTubeCaptionTool } from "./researchTools.js";
 
 // Imported only for type usage in TaskTool; the actual Agent class is loaded
 // lazily inside execute() to avoid import cycles.
 import type { Agent } from "../agents/index.js";
+
+const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 
 // =============================================================================
 // Task Tool - Context Isolation via Sub-agents
@@ -78,7 +81,7 @@ Guidelines:
 - Target 200-500 tokens for your final response
 - Your response will be passed to another agent, so make it self-contained
 `,
-    toolNames: ["web_search", "web_fetch", "think"]
+    toolNames: ["web_search", "web_fetch", "arxiv_search", "youtube_caption", "think"]
   },
   general: {
     description: "General-purpose agent for complex multi-step tasks",
@@ -268,7 +271,9 @@ export class TaskTool extends BaseTool {
       ["list_directory", new ListDirectoryTool()],
       ["grep_search", new GrepSearchTool()],
       ["web_search", new WebSearchTool()],
-      ["web_fetch", new WebFetchTool()]
+      ["web_fetch", new WebFetchTool()],
+      ["arxiv_search", new ArxivSearchTool()],
+      ["youtube_caption", new YouTubeCaptionTool()]
     ]);
 
     const tools: BaseTool[] = [];
@@ -688,7 +693,8 @@ export class SkillsTool extends BaseTool {
     });
 
     // Build list of skill paths (later paths override earlier).
-    if (options.builtinPath) this.skillPaths.push(options.builtinPath);
+    const builtinPath = options.builtinPath ?? getDefaultBuiltinSkillsPath();
+    if (builtinPath) this.skillPaths.push(builtinPath);
     if (options.userPath) {
       this.skillPaths.push(options.userPath);
     } else {
@@ -847,6 +853,14 @@ export class SkillsTool extends BaseTool {
   }
 }
 
+function getDefaultBuiltinSkillsPath(): string | undefined {
+  const candidates = [
+    path.resolve(MODULE_DIR, "../skills"),
+    path.resolve(MODULE_DIR, "../../src/skills")
+  ];
+  return candidates.find((candidate) => fs.existsSync(candidate));
+}
+
 // =============================================================================
 // Multi-Edit Tool - Atomic File Edits
 // =============================================================================
@@ -979,7 +993,7 @@ export class MultiEditTool extends BaseTool {
           });
         }
 
-        content = content.replace(oldStr, newStr);
+        content = content.replace(oldStr, () => newStr);
         applied.push(`Edit ${i + 1}: replaced ${oldStr.length} chars with ${newStr.length} chars`);
       }
 

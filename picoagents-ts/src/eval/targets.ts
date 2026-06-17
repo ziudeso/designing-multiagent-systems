@@ -2,12 +2,10 @@
  * Evaluation targets - what we run tasks against.
  *
  * Concrete Target implementations for running tasks against different systems:
- * picoagents Agents, direct model calls, the Claude Code CLI, and arbitrary
- * callables. Ported from Python `eval/_targets.py`.
+ * picoagents Agents, direct model calls, orchestrators, the Claude Code CLI,
+ * and arbitrary callables. Ported from Python `eval/_targets.py`.
  *
  * Deviations from the Python port:
- * - `OrchestratorEvalTarget` is OMITTED: the TS port has no orchestration module,
- *   so there is no orchestrator to wrap.
  * - `CopilotTarget` is OMITTED (no GitHub Copilot SDK binding in the TS port).
  * - `ClaudeCodeTarget` shells out to the Claude Code CLI via `child_process`
  *   instead of the Python `claude-code-sdk` package; the public shape is kept.
@@ -26,6 +24,7 @@ import {
   UserMessage
 } from "../messages.js";
 import { BaseMiddleware } from "../middleware.js";
+import type { BaseOrchestrator } from "../orchestration/index.js";
 import { AgentResponse, Usage } from "../types.js";
 import { AgentEvent } from "../types.js";
 import { BaseEvent } from "../types.js";
@@ -59,9 +58,9 @@ export class AgentEvalTarget extends Target {
         error: undefined,
         usage: response.usage,
         metadata: {
-          target_type: "agent",
-          target_name: this.name,
-          execution_time_ms: endTime - startTime
+          targetType: "agent",
+          targetName: this.name,
+          executionTimeMs: endTime - startTime
         }
       });
     } catch (e) {
@@ -73,9 +72,9 @@ export class AgentEvalTarget extends Target {
         error: e instanceof Error ? e.message : String(e),
         usage: new Usage({ durationMs: endTime - startTime }),
         metadata: {
-          target_type: "agent",
-          target_name: this.name,
-          execution_time_ms: endTime - startTime
+          targetType: "agent",
+          targetName: this.name,
+          executionTimeMs: endTime - startTime
         }
       });
     }
@@ -113,11 +112,11 @@ export class ModelEvalTarget extends Target {
         error: undefined,
         usage: result.usage,
         metadata: {
-          target_type: "model",
-          target_name: this.name,
+          targetType: "model",
+          targetName: this.name,
           model: result.model,
-          finish_reason: result.finishReason,
-          execution_time_ms: endTime - startTime
+          finishReason: result.finishReason,
+          executionTimeMs: endTime - startTime
         }
       });
     } catch (e) {
@@ -129,9 +128,59 @@ export class ModelEvalTarget extends Target {
         error: e instanceof Error ? e.message : String(e),
         usage: new Usage({ durationMs: endTime - startTime }),
         metadata: {
-          target_type: "model",
-          target_name: this.name,
-          execution_time_ms: endTime - startTime
+          targetType: "model",
+          targetName: this.name,
+          executionTimeMs: endTime - startTime
+        }
+      });
+    }
+  }
+}
+
+/** Target for picoagents orchestrators. */
+export class OrchestratorEvalTarget extends Target {
+  orchestrator: BaseOrchestrator;
+
+  constructor(orchestrator: BaseOrchestrator, name?: string) {
+    super(name ?? orchestrator.constructor.name);
+    this.orchestrator = orchestrator;
+  }
+
+  async run(task: Task, cancellationToken?: CancellationToken): Promise<RunTrajectory> {
+    const startTime = Date.now();
+    try {
+      const response = await this.orchestrator.run(task.input, { cancellationToken });
+      const endTime = Date.now();
+      return new RunTrajectory({
+        task,
+        messages: response.messages,
+        success: true,
+        error: undefined,
+        usage: response.usage,
+        metadata: {
+          targetType: "orchestrator",
+          targetName: this.name,
+          pattern: response.patternMetadata?.pattern ?? "unknown",
+          iterations:
+            response.patternMetadata?.iterationsCompleted ??
+            response.patternMetadata?.iterations_completed ??
+            0,
+          stopReason: response.stopMessage.source,
+          executionTimeMs: endTime - startTime
+        }
+      });
+    } catch (e) {
+      const endTime = Date.now();
+      return new RunTrajectory({
+        task,
+        messages: [],
+        success: false,
+        error: e instanceof Error ? e.message : String(e),
+        usage: new Usage({ durationMs: endTime - startTime }),
+        metadata: {
+          targetType: "orchestrator",
+          targetName: this.name,
+          executionTimeMs: endTime - startTime
         }
       });
     }
@@ -190,19 +239,19 @@ export class PicoAgentTarget extends Target {
           success: false,
           error: "No response from agent",
           usage: new Usage(),
-          metadata: { exception_type: "NoResponse", events: allEvents }
+          metadata: { exceptionType: "NoResponse", events: allEvents }
         });
       }
 
       const contextMessages = response.context ? [...response.context.messages] : [];
 
       const metadata: Record<string, unknown> = {
-        finish_reason: response.finishReason,
-        tool_calls: response.usage.toolCalls
+        finishReason: response.finishReason,
+        toolCalls: response.usage.toolCalls
       };
       if (allEvents.length) {
         metadata.events = allEvents.map((e) => serializeEvent(e));
-        metadata.event_count = allEvents.length;
+        metadata.eventCount = allEvents.length;
       }
 
       return new RunTrajectory({
@@ -226,7 +275,7 @@ export class PicoAgentTarget extends Target {
         success: false,
         error: e instanceof Error ? e.message : String(e),
         usage: new Usage(),
-        metadata: { exception_type: e instanceof Error ? e.name : typeof e }
+        metadata: { exceptionType: e instanceof Error ? e.name : typeof e }
       });
     }
   }
@@ -427,11 +476,11 @@ export class ClaudeCodeTarget extends Target {
     }
 
     const metadata: Record<string, unknown> = {
-      target_type: "claude_code",
-      target_name: this.name
+      targetType: "claude_code",
+      targetName: this.name
     };
-    if (totalCostUsd !== undefined) metadata.total_cost_usd = totalCostUsd;
-    if (Object.keys(usageBreakdown).length) metadata.usage_breakdown = usageBreakdown;
+    if (totalCostUsd !== undefined) metadata.totalCostUsd = totalCostUsd;
+    if (Object.keys(usageBreakdown).length) metadata.usageBreakdown = usageBreakdown;
 
     return new RunTrajectory({
       task,

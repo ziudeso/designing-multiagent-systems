@@ -7,65 +7,65 @@ export interface EntityInfo {
   description?: string;
   type: EntityType;
   source: EntitySource | string;
-  module_path?: string;
+  modulePath?: string;
   tools: string[];
-  has_env: boolean;
-  example_tasks: string[];
+  hasEnv: boolean;
+  exampleTasks: string[];
 }
 
 export interface AgentInfo extends EntityInfo {
   type: "agent";
   model?: string;
-  memory_type?: string;
+  memoryType?: string;
 }
 
 export interface OrchestratorInfo extends EntityInfo {
   type: "orchestrator";
-  orchestrator_type: string;
+  orchestratorType: string;
   agents: string[];
-  termination_conditions: string[];
+  terminationConditions: string[];
 }
 
 export interface WorkflowInfo extends EntityInfo {
   type: "workflow";
   steps: string[];
-  input_schema?: Record<string, unknown>;
-  start_step?: string;
+  inputSchema?: Record<string, unknown>;
+  startStep?: string;
 }
 
 export type Entity = AgentInfo | OrchestratorInfo | WorkflowInfo;
 
 export interface WebUIStreamEvent {
-  session_id: string;
+  sessionId: string;
   timestamp: string;
   event: unknown;
 }
 
 export interface HealthResponse {
   status: string;
-  entities_dir?: string;
-  entities_count: number;
+  entitiesDir?: string;
+  entitiesCount: number;
 }
 
 export interface AddExampleRequest {
-  example_id: string;
-  github_path: string;
+  exampleId: string;
+  githubPath: string;
   category: "agent" | "workflow" | "orchestrator" | string;
 }
 
 export interface RunEntityRequest {
   messages?: unknown[];
-  input_data?: unknown;
-  session_id?: string;
-  stream_tokens?: boolean;
-  approval_responses?: unknown[];
+  inputData?: unknown;
+  sessionId?: string;
+  streamTokens?: boolean;
+  approvalResponses?: unknown[];
 }
 
 export interface SessionInfo {
   id: string;
-  entity_id: string;
-  entity_type: EntityType | string;
-  created_at: string;
-  message_count: number;
-  last_activity: string;
+  entityId: string;
+  entityType: EntityType | string;
+  createdAt: string;
+  messageCount: number;
+  lastActivity: string;
 }

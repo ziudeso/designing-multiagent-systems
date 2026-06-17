@@ -7,6 +7,8 @@ import { BaseTool, JSONSchema, ToolResult } from "./base.js";
 
 export interface WorkspaceToolOptions {
   workspace?: string;
+  timeout?: number;
+  bashTimeout?: number;
 }
 
 abstract class WorkspaceTool extends BaseTool {
@@ -156,7 +158,7 @@ export class WriteFileTool extends WorkspaceTool {
         if (!current.includes(oldStr)) {
           throw new Error(`String to replace not found in file: ${oldStr.slice(0, 50)}`);
         }
-        await fs.writeFile(fullPath, current.replace(oldStr, newStr), encoding as BufferEncoding);
+        await fs.writeFile(fullPath, current.replace(oldStr, () => newStr), encoding as BufferEncoding);
         return new ToolResult({
           success: true,
           result: `Successfully replaced text in ${filePath}`,
@@ -361,7 +363,7 @@ export class BashExecuteTool extends WorkspaceTool {
   static componentProvider = "picoagents.tools.BashExecuteTool";
   static componentVersion = 1;
 
-  static fromConfig(config: WorkspaceToolOptions & { timeout?: number } = {}): BashExecuteTool {
+  static fromConfig(config: WorkspaceToolOptions = {}): BashExecuteTool {
     return new BashExecuteTool(config);
   }
 
@@ -369,13 +371,13 @@ export class BashExecuteTool extends WorkspaceTool {
     return { workspace: this.workspace, timeout: this.timeout };
   }
 
-  constructor(options: WorkspaceToolOptions & { timeout?: number } = {}) {
+  constructor(options: WorkspaceToolOptions = {}) {
     super({
       name: "bash_execute",
       description: "Execute shell commands in the workspace.",
       workspace: options.workspace
     });
-    this.timeout = options.timeout ?? 30;
+    this.timeout = options.timeout ?? options.bashTimeout ?? 30;
   }
 
   get parameters(): JSONSchema {
@@ -468,10 +470,16 @@ export class PythonREPLTool extends WorkspaceTool {
         metadata: { codeLength: code.length, returncode: result.code }
       });
     } catch (error) {
+      const message =
+        isMissingExecutableError(error)
+          ? "python3 executable not found on PATH. Install Python 3 or configure PATH before using PythonREPLTool."
+          : error instanceof Error
+            ? error.message
+            : String(error);
       return new ToolResult({
         success: false,
         result: null,
-        error: `Python execution failed: ${error instanceof Error ? error.message : String(error)}`,
+        error: `Python execution failed: ${message}`,
         metadata: { codeLength: code.length }
       });
     }
@@ -494,6 +502,10 @@ export function createCodingTools(options: WorkspaceToolOptions = {}): BaseTool[
     new BashExecuteTool(options),
     new PythonREPLTool(options)
   ];
+}
+
+function isMissingExecutableError(error: unknown): boolean {
+  return Boolean(error && typeof error === "object" && (error as NodeJS.ErrnoException).code === "ENOENT");
 }
 
 async function listFlat(directory: string): Promise<Array<{ name: string; type: string; size: number | null }>> {

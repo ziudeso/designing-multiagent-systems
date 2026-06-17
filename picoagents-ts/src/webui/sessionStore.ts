@@ -156,14 +156,14 @@ function sessionInfoFromContext(id: string, context: AgentContext): SessionInfo 
     : new Date(String(lastActivityValue)).toISOString();
   return {
     id,
-    entity_id: String(context.metadata.entityId ?? context.metadata.entity_id ?? "unknown"),
-    entity_type: String(context.metadata.entityType ?? context.metadata.entity_type ?? "agent"),
-    created_at: context.createdAt.toISOString(),
-    message_count: context.messages.length,
-    last_activity: lastActivity
+    entityId: String(context.metadata.entityId ?? context.metadata.entity_id ?? "unknown"),
+    entityType: String(context.metadata.entityType ?? context.metadata.entity_type ?? "agent"),
+    createdAt: context.createdAt.toISOString(),
+    messageCount: context.messages.length,
+    lastActivity: lastActivity
   };
 }
 
 function sortSessions(sessions: SessionInfo[]): SessionInfo[] {
-  return sessions.sort((left, right) => right.last_activity.localeCompare(left.last_activity));
+  return sessions.sort((left, right) => right.lastActivity.localeCompare(left.lastActivity));
 }

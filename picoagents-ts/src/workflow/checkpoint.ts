@@ -556,7 +556,9 @@ export function computeWorkflowStructureHash(
   for (const stepId of sortedStepIds) {
     const step = steps[stepId]!;
     stepsStructure[stepId] = {
-      type: step.constructor.name
+      type: step.constructor.name,
+      input_type: getStepTypeFingerprint(step.inputTypeName, step.inputSchema),
+      output_type: getStepTypeFingerprint(step.outputTypeName, step.outputSchema)
     };
   }
 
@@ -591,4 +593,14 @@ function stableStringify(value: unknown): string {
   const obj = value as Record<string, unknown>;
   const keys = Object.keys(obj).sort();
   return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(obj[k])}`).join(",")}}`;
+}
+
+function getStepTypeFingerprint(typeName: string | undefined, schema: unknown): string {
+  if (typeName) return typeName;
+  if (schema && typeof schema === "object" && !Array.isArray(schema)) {
+    const title = (schema as Record<string, unknown>).title;
+    if (typeof title === "string" && title) return title;
+    return stableStringify(schema);
+  }
+  return "Record";
 }

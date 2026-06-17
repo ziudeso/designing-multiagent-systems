@@ -4,8 +4,8 @@
  * EvalRunner executes tasks against targets, scores results with judges, and
  * collects metrics. Ported from Python `eval/_runner.py`.
  *
- * `run()` accepts any mix of Target, AgentConfig, or BaseAgent instances; they
- * are auto-resolved to the appropriate Target wrapper.
+ * `run()` accepts any mix of Target, AgentConfig, BaseAgent, or BaseOrchestrator
+ * instances; they are auto-resolved to the appropriate Target wrapper.
  */
 
 import { promises as fs } from "node:fs";
@@ -13,13 +13,14 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { BaseAgent } from "../agents/base.js";
 import type { CancellationToken } from "../cancellation.js";
+import { BaseOrchestrator } from "../orchestration/index.js";
 import { Usage } from "../types.js";
 import { EvalJudge, Target } from "./base.js";
 import { AgentConfig } from "./config.js";
 import { Dataset } from "./dataset.js";
 import { RunMiddleware } from "./middleware.js";
 import { EvalResults, TaskResult } from "./results.js";
-import { AgentEvalTarget, PicoAgentTarget } from "./targets.js";
+import { AgentEvalTarget, OrchestratorEvalTarget, PicoAgentTarget } from "./targets.js";
 import { EvalScore, RunTrajectory, Task } from "./types.js";
 
 /**
@@ -27,8 +28,9 @@ import { EvalScore, RunTrajectory, Task } from "./types.js";
  * - `Target`: used as-is
  * - `AgentConfig`: wrapped in `PicoAgentTarget` (fresh agent per task)
  * - `BaseAgent`: wrapped in `AgentEvalTarget` (reuses instance)
+ * - `BaseOrchestrator`: wrapped in `OrchestratorEvalTarget` (reuses instance)
  */
-export type Runnable = Target | AgentConfig | BaseAgent;
+export type Runnable = Target | AgentConfig | BaseAgent | BaseOrchestrator;
 
 export interface EvalRunnerOptions {
   /** Run tasks in parallel (default: false for fair comparison). */
@@ -40,6 +42,8 @@ export interface EvalRunnerOptions {
 export interface EvalRunnerRunOptions {
   taskFilter?: (task: Task) => boolean;
   cancellationToken?: CancellationToken;
+  /** Save completed eval results through the default PicoStore. */
+  persist?: boolean;
 }
 
 /** Runs evaluation tasks against targets and scores the results. */
@@ -118,8 +122,9 @@ export class EvalRunner {
     if (item instanceof Target) return item;
     if (item instanceof AgentConfig) return new PicoAgentTarget(item);
     if (item instanceof BaseAgent) return new AgentEvalTarget(item);
+    if (item instanceof BaseOrchestrator) return new OrchestratorEvalTarget(item);
     throw new TypeError(
-      `Expected Target, AgentConfig, or BaseAgent, got ${(item as object)?.constructor?.name ?? typeof item}`
+      `Expected Target, AgentConfig, BaseAgent, or BaseOrchestrator, got ${(item as object)?.constructor?.name ?? typeof item}`
     );
   }
 
@@ -134,7 +139,7 @@ export class EvalRunner {
     targets: Runnable[],
     options: EvalRunnerRunOptions = {}
   ): Promise<EvalResults> {
-    const { taskFilter, cancellationToken } = options;
+    const { taskFilter, cancellationToken, persist } = options;
     const resolvedTargets = targets.map((t) => EvalRunner.resolveTarget(t));
     let tasks = [...dataset.tasks];
     if (taskFilter) tasks = tasks.filter(taskFilter);
@@ -157,6 +162,19 @@ export class EvalRunner {
         if (cancellationToken?.isCancelled()) break;
         const taskResults = await this.runTarget(target, tasks, dataset, cancellationToken);
         for (const taskResult of taskResults) results.addResult(taskResult);
+      }
+    }
+
+    if (persist) {
+      try {
+        const filePath = await results.save();
+        const { getDefaultStore } = await import("../store/index.js");
+        const store = getDefaultStore();
+        if (store && "saveEvalRunFromResults" in store) {
+          await store.saveEvalRunFromResults(results, filePath);
+        }
+      } catch (error) {
+        console.warn(`Failed to persist eval results: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
 
@@ -186,7 +204,7 @@ export class EvalRunner {
     return results;
   }
 
-  private async runSingleTask(
+  async runSingleTask(
     target: Target,
     task: Task,
     dataset: Dataset,
@@ -214,11 +232,16 @@ export class EvalRunner {
         }
         trajectory = await taskTarget.run(task, cancellationToken, { middlewares: [middleware] });
       } else if (target instanceof AgentEvalTarget) {
-        target.agent.middlewareChain.add(middleware);
+        const chain = target.agent.middlewareChain;
+        if (chain) {
+          chain.add(middleware);
+        }
         try {
           trajectory = await target.run(task, cancellationToken);
         } finally {
-          target.agent.middlewareChain.remove(middleware);
+          if (chain) {
+            chain.remove(middleware);
+          }
         }
       } else {
         trajectory = await target.run(task, cancellationToken);
@@ -238,11 +261,11 @@ export class EvalRunner {
       targetName: target.name,
       trajectory,
       score,
-      filesRead: (metrics.file_reads as Record<string, number>) ?? {},
-      uniqueFiles: (metrics.unique_files as number) ?? 0,
-      duplicateReads: (metrics.duplicate_reads as number) ?? 0,
-      compactionEvents: (metrics.compaction_events as number) ?? 0,
-      tokensSaved: (metrics.tokens_saved as number) ?? 0,
+      filesRead: (metrics.fileReads as Record<string, number>) ?? {},
+      uniqueFiles: (metrics.uniqueFiles as number) ?? 0,
+      duplicateReads: (metrics.duplicateReads as number) ?? 0,
+      compactionEvents: (metrics.compactionEvents as number) ?? 0,
+      tokensSaved: (metrics.tokensSaved as number) ?? 0,
       metrics
     });
   }
@@ -267,7 +290,7 @@ export class EvalRunner {
         dimensions,
         reasoning,
         trajectory,
-        metadata: { judge_error: message }
+        metadata: { judgeError: message }
       });
     }
   }

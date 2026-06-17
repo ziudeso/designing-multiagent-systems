@@ -221,11 +221,11 @@ export class DateTimeTool extends BaseTool {
       } else if (operation === "parse") {
         const value = String(parameters.value ?? "");
         if (!value) throw new Error("'value' parameter required for parse operation");
-        result = toPythonUtcIsoString(new Date(value));
+        result = parsePythonDateTime(value).toIsoString();
       } else if (operation === "format") {
         const value = String(parameters.value ?? "");
         if (!value) throw new Error("'value' parameter required for format operation");
-        result = formatDate(new Date(value), String(parameters.format ?? "%Y-%m-%d %H:%M:%S"));
+        result = formatParsedDate(parsePythonDateTime(value), String(parameters.format ?? "%Y-%m-%d %H:%M:%S"));
       } else {
         throw new Error(`Unknown operation: ${operation}`);
       }
@@ -468,20 +468,84 @@ function pythonSum(...values: unknown[]): number {
 function toPythonUtcIsoString(date: Date): string {
   if (Number.isNaN(date.getTime())) throw new Error("Invalid datetime value");
   const iso = date.toISOString();
+  const msMatch = iso.match(/\.(\d{3})Z$/);
+  if (msMatch && msMatch[1] !== "000") {
+    return iso.replace(/\.(\d{3})Z$/, `.${msMatch[1]}000+00:00`);
+  }
   return iso.endsWith(".000Z")
     ? iso.replace(".000Z", "+00:00")
     : iso.replace("Z", "+00:00");
 }
 
-function formatDate(date: Date, format: string): string {
+interface ParsedDateTime {
+  year: number;
+  month: number;
+  day: number;
+  hour: number;
+  minute: number;
+  second: number;
+  microsecond: number;
+  offset?: string;
+  toIsoString: () => string;
+}
+
+function parsePythonDateTime(value: string): ParsedDateTime {
+  const normalized = value.trim().replace(" ", "T");
+  const match = normalized.match(
+    /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2})(?::(\d{2})(?::(\d{2})(?:\.(\d{1,6}))?)?)?(Z|[+-]\d{2}:\d{2})?)?$/
+  );
+  if (!match) throw new Error("Invalid datetime value");
+
+  const microsecond = Number((match[7] ?? "").padEnd(6, "0")) || 0;
+  const offset = match[8] === "Z" ? "+00:00" : match[8];
+  const parsed: ParsedDateTime = {
+    year: Number(match[1]),
+    month: Number(match[2]),
+    day: Number(match[3]),
+    hour: Number(match[4] ?? 0),
+    minute: Number(match[5] ?? 0),
+    second: Number(match[6] ?? 0),
+    microsecond,
+    offset,
+    toIsoString() {
+      const datePart = `${String(this.year).padStart(4, "0")}-${pad2(this.month)}-${pad2(this.day)}`;
+      const timePart = `T${pad2(this.hour)}:${pad2(this.minute)}:${pad2(this.second)}`;
+      const fractional = this.microsecond === 0 ? "" : `.${String(this.microsecond).padStart(6, "0")}`;
+      return `${datePart}${timePart}${fractional}${this.offset ?? ""}`;
+    }
+  };
+
+  validateParsedDate(parsed);
+  return parsed;
+}
+
+function validateParsedDate(value: ParsedDateTime): void {
+  const probe = new Date(Date.UTC(value.year, value.month - 1, value.day, value.hour, value.minute, value.second));
+  if (
+    probe.getUTCFullYear() !== value.year ||
+    probe.getUTCMonth() !== value.month - 1 ||
+    probe.getUTCDate() !== value.day ||
+    probe.getUTCHours() !== value.hour ||
+    probe.getUTCMinutes() !== value.minute ||
+    probe.getUTCSeconds() !== value.second
+  ) {
+    throw new Error("Invalid datetime value");
+  }
+}
+
+function formatParsedDate(date: ParsedDateTime, format: string): string {
   const pad = (value: number) => String(value).padStart(2, "0");
   return format
-    .replaceAll("%Y", String(date.getUTCFullYear()))
-    .replaceAll("%m", pad(date.getUTCMonth() + 1))
-    .replaceAll("%d", pad(date.getUTCDate()))
-    .replaceAll("%H", pad(date.getUTCHours()))
-    .replaceAll("%M", pad(date.getUTCMinutes()))
-    .replaceAll("%S", pad(date.getUTCSeconds()));
+    .replaceAll("%Y", String(date.year).padStart(4, "0"))
+    .replaceAll("%m", pad(date.month))
+    .replaceAll("%d", pad(date.day))
+    .replaceAll("%H", pad(date.hour))
+    .replaceAll("%M", pad(date.minute))
+    .replaceAll("%S", pad(date.second));
+}
+
+function pad2(value: number): string {
+  return String(value).padStart(2, "0");
 }
 
 function readPath(value: unknown, path: string): unknown {

@@ -3,9 +3,12 @@ import { createServer, IncomingMessage, Server, ServerResponse } from "node:http
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { CancellationToken } from "../cancellation.js";
+import { getDefaultStore, PicoStore } from "../store/index.js";
 import { AgentResponse } from "../types.js";
+import { EvalJobManager } from "./evalJobs.js";
 import { ExecutionEngine } from "./execution.js";
 import type { AddExampleRequest, Entity, HealthResponse, RunEntityRequest } from "./models.js";
+import { handlePersistenceApi } from "./persistenceApi.js";
 import { EntityRegistry } from "./registry.js";
 import {
   parseMessages,
@@ -19,6 +22,9 @@ export interface PicoAgentsWebUIServerOptions {
   enableCors?: boolean;
   corsOrigins?: string[];
   staticDir?: string;
+  /** Persistence store for runs/eval APIs. Pass `null` or `enablePersistence: false` to disable. */
+  store?: PicoStore | null;
+  enablePersistence?: boolean;
 }
 
 export class PicoAgentsWebUIServer {
@@ -29,6 +35,8 @@ export class PicoAgentsWebUIServer {
   registry: EntityRegistry;
   sessionManager: SessionManager;
   executionEngine: ExecutionEngine;
+  store?: PicoStore;
+  evalJobs?: EvalJobManager;
   private initialized = false;
 
   constructor(options: PicoAgentsWebUIServerOptions = {}) {
@@ -39,6 +47,10 @@ export class PicoAgentsWebUIServer {
     this.registry = new EntityRegistry(options.entitiesDir);
     this.sessionManager = new SessionManager();
     this.executionEngine = new ExecutionEngine(this.sessionManager);
+    if (options.enablePersistence !== false && options.store !== null) {
+      this.store = options.store ?? resolveDefaultStore();
+      this.evalJobs = new EvalJobManager(this.store, { registry: this.registry });
+    }
   }
 
   registerEntity(entityId: string, entityObject: unknown): Entity | undefined {
@@ -48,6 +60,7 @@ export class PicoAgentsWebUIServer {
   async initialize(): Promise<void> {
     if (this.initialized) return;
     await this.registry.refreshEntities();
+    await this.store?.initialize();
     this.initialized = true;
   }
 
@@ -77,8 +90,8 @@ export class PicoAgentsWebUIServer {
     if (method === "GET" && pathname === "/api/health") {
       const body: HealthResponse = {
         status: "healthy",
-        entities_dir: this.entitiesDir,
-        entities_count: this.registry.listEntities().length
+        entitiesDir: this.entitiesDir,
+        entitiesCount: this.registry.listEntities().length
       };
       sendJson(response, 200, body, corsHeaders);
       return;
@@ -90,14 +103,16 @@ export class PicoAgentsWebUIServer {
     }
 
     if (method === "POST" && pathname === "/api/entities/add") {
-      const body = await readJson<AddExampleRequest>(request);
+      const body = await readJson<Record<string, any> & AddExampleRequest>(request);
+      const githubPath = body.githubPath ?? body.github_path;
+      const exampleId = body.exampleId ?? body.example_id;
       const baseUrl = "https://raw.githubusercontent.com/victordibia/designing-multiagent-systems/main";
       const entity = await this.registry.registerFromUrl(
-        `${baseUrl}/${body.github_path}`,
-        body.example_id
+        `${baseUrl}/${githubPath}`,
+        exampleId
       );
       if (!entity) {
-        sendJson(response, 500, { detail: `Failed to register example: ${body.example_id}` }, corsHeaders);
+        sendJson(response, 500, { detail: `Failed to register example: ${exampleId}` }, corsHeaders);
         return;
       }
       sendJson(response, 200, entity, corsHeaders);
@@ -121,7 +136,7 @@ export class PicoAgentsWebUIServer {
       } else {
         sendJson(response, 200, {
           status: "success",
-          entity_id: entityMatch[1],
+          entityId: entityMatch[1],
           message: "Entity removed successfully"
         }, corsHeaders);
       }
@@ -141,25 +156,32 @@ export class PicoAgentsWebUIServer {
     }
 
     if (method === "GET" && pathname === "/api/sessions") {
-      sendJson(response, 200, await this.sessionManager.list(url.searchParams.get("entity_id") ?? undefined), corsHeaders);
+      sendJson(
+        response,
+        200,
+        await this.sessionManager.list(url.searchParams.get("entityId") ?? url.searchParams.get("entity_id") ?? undefined),
+        corsHeaders
+      );
       return;
     }
 
     if (method === "POST" && pathname === "/api/sessions") {
-      const body = await readJson<{ entity_id?: string; entity_type?: string }>(request);
-      if (!body.entity_id) {
-        sendJson(response, 400, { detail: "entity_id is required" }, corsHeaders);
+      const body = await readJson<Record<string, any>>(request);
+      const entityId = body.entityId ?? body.entity_id;
+      const entityType = body.entityType ?? body.entity_type ?? "agent";
+      if (!entityId) {
+        sendJson(response, 400, { detail: "entityId is required" }, corsHeaders);
         return;
       }
       const sessionId = this.sessionManager.createSessionId();
-      const context = await this.sessionManager.getOrCreate(sessionId, body.entity_id, body.entity_type ?? "agent");
+      const context = await this.sessionManager.getOrCreate(sessionId, entityId, entityType);
       sendJson(response, 200, {
         id: sessionId,
-        entity_id: body.entity_id,
-        entity_type: body.entity_type ?? "agent",
-        created_at: context.createdAt.toISOString(),
-        message_count: 0,
-        last_activity: context.createdAt.toISOString()
+        entityId,
+        entityType,
+        createdAt: context.createdAt.toISOString(),
+        messageCount: 0,
+        lastActivity: context.createdAt.toISOString()
       }, corsHeaders);
       return;
     }
@@ -168,7 +190,7 @@ export class PicoAgentsWebUIServer {
     if (sessionMessagesMatch && method === "GET") {
       const context = await this.sessionManager.get(sessionMessagesMatch[1]!);
       if (!context) sendJson(response, 404, { detail: `Session ${sessionMessagesMatch[1]} not found` }, corsHeaders);
-      else sendJson(response, 200, { session_id: sessionMessagesMatch[1], messages: context.messages }, corsHeaders);
+      else sendJson(response, 200, { sessionId: sessionMessagesMatch[1], messages: context.messages }, corsHeaders);
       return;
     }
 
@@ -183,7 +205,7 @@ export class PicoAgentsWebUIServer {
     if (sessionMatch && method === "DELETE") {
       const deleted = await this.sessionManager.delete(sessionMatch[1]!);
       if (!deleted) sendJson(response, 404, { detail: `Session ${sessionMatch[1]} not found` }, corsHeaders);
-      else sendJson(response, 200, { status: "deleted", session_id: sessionMatch[1] }, corsHeaders);
+      else sendJson(response, 200, { status: "deleted", sessionId: sessionMatch[1] }, corsHeaders);
       return;
     }
 
@@ -199,22 +221,31 @@ export class PicoAgentsWebUIServer {
       sendJson(response, 200, {
         entities: {
           total: entities.length,
-          by_type: {
+          byType: {
             agents: entities.filter((entity) => entity.type === "agent").length,
             orchestrators: entities.filter((entity) => entity.type === "orchestrator").length,
             workflows: entities.filter((entity) => entity.type === "workflow").length
           }
         },
         sessions: {
-          total_sessions: sessions.length,
-          total_messages: sessions.reduce((sum, session) => sum + session.message_count, 0)
+          totalSessions: sessions.length,
+          totalMessages: sessions.reduce((sum, session) => sum + session.messageCount, 0)
         }
       }, corsHeaders);
       return;
     }
 
     if (pathname.startsWith("/api/runs") || pathname.startsWith("/api/eval")) {
-      this.handlePersistenceApi(pathname, method, response, corsHeaders);
+      await handlePersistenceApi({
+        pathname,
+        method,
+        url,
+        request,
+        response,
+        headers: corsHeaders,
+        store: this.store,
+        evalJobs: this.evalJobs
+      });
       return;
     }
 
@@ -247,7 +278,11 @@ export class PicoAgentsWebUIServer {
       sendJson(response, 400, { detail: "Messages required for agent execution" }, headers);
       return;
     }
-    const result = await this.executionEngine.executeAgent(entity, parseMessages(body.messages), body.session_id);
+    const result = await this.executionEngine.executeAgent(
+      entity,
+      parseMessages(body.messages),
+      body.sessionId ?? (body as any).session_id
+    );
     sendJson(response, 200, serializeEvent(result), headers);
   }
 
@@ -279,7 +314,8 @@ export class PicoAgentsWebUIServer {
 
     let stream: AsyncGenerator<string>;
     if (info.type === "agent") {
-      if (!body.messages?.length && !body.approval_responses?.length) {
+      const approvalResponses = body.approvalResponses ?? (body as any).approval_responses;
+      if (!body.messages?.length && !approvalResponses?.length) {
         response.write(`data: ${JSON.stringify({ error: "Messages required for agent execution" })}\n\n`);
         response.end();
         return;
@@ -287,9 +323,9 @@ export class PicoAgentsWebUIServer {
       stream = this.executionEngine.executeAgentStream({
         agent: entity,
         messages: parseMessages(body.messages),
-        sessionId: body.session_id,
-        streamTokens: body.stream_tokens ?? true,
-        approvalResponses: body.approval_responses,
+        sessionId: body.sessionId ?? (body as any).session_id,
+        streamTokens: body.streamTokens ?? (body as any).stream_tokens ?? true,
+        approvalResponses,
         cancellationToken: token
       });
     } else if (info.type === "orchestrator") {
@@ -301,19 +337,20 @@ export class PicoAgentsWebUIServer {
       stream = this.executionEngine.executeOrchestratorStream({
         orchestrator: entity,
         messages: parseMessages(body.messages),
-        sessionId: body.session_id,
+        sessionId: body.sessionId ?? (body as any).session_id,
         cancellationToken: token
       });
     } else {
-      if (body.input_data === undefined) {
+      const inputData = body.inputData ?? (body as any).input_data;
+      if (inputData === undefined) {
         response.write(`data: ${JSON.stringify({ error: "Input data required for workflow execution" })}\n\n`);
         response.end();
         return;
       }
       stream = this.executionEngine.executeWorkflowStream({
         workflow: entity,
-        inputData: body.input_data,
-        sessionId: body.session_id,
+        inputData,
+        sessionId: body.sessionId ?? (body as any).session_id,
         cancellationToken: token
       });
     }
@@ -322,33 +359,6 @@ export class PicoAgentsWebUIServer {
       response.write(chunk);
     }
     response.end();
-  }
-
-  private handlePersistenceApi(
-    pathname: string,
-    method: string,
-    response: ServerResponse,
-    headers: Record<string, string>
-  ): void {
-    if (method === "GET") {
-      if (
-        pathname === "/api/runs" ||
-        pathname === "/api/eval/datasets" ||
-        pathname === "/api/eval/builtin-datasets" ||
-        pathname === "/api/eval/targets" ||
-        pathname === "/api/eval/runs" ||
-        /^\/api\/eval\/runs\/[^/]+\/results$/.test(pathname)
-      ) {
-        sendJson(response, 200, [], headers);
-        return;
-      }
-      sendJson(response, 404, { detail: "Persistence item not found" }, headers);
-      return;
-    }
-
-    sendJson(response, 503, {
-      detail: "Persistence-backed runs and eval APIs are not configured in picoagents-ts."
-    }, headers);
   }
 
   private corsHeaders(request: IncomingMessage): Record<string, string> {
@@ -361,7 +371,7 @@ export class PicoAgentsWebUIServer {
         : this.corsOrigins[0] ?? "*";
     const headers: Record<string, string> = {
       "access-control-allow-origin": allowOrigin,
-      "access-control-allow-methods": "GET,POST,DELETE,OPTIONS",
+      "access-control-allow-methods": "GET,POST,PUT,DELETE,OPTIONS",
       "access-control-allow-headers": "content-type,authorization"
     };
     if (allowOrigin !== "*") {
@@ -398,6 +408,11 @@ export class PicoAgentsWebUIServer {
 
 export async function createApp(options: PicoAgentsWebUIServerOptions = {}): Promise<Server> {
   return new PicoAgentsWebUIServer(options).createHttpServer();
+}
+
+function resolveDefaultStore(): PicoStore {
+  const store = getDefaultStore();
+  return store instanceof PicoStore ? store : new PicoStore();
 }
 
 async function readJson<T>(request: IncomingMessage): Promise<T> {

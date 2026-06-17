@@ -4,19 +4,26 @@ import { test } from "node:test";
 import {
   CheckpointConfig,
   CheckpointSavedEvent,
+  Context,
   EdgeActivatedEvent,
+  EchoStep,
   FunctionStep,
   InMemoryCheckpointStore,
+  PicoAgentStep,
   StepCompletedEvent,
+  StepStartedEvent,
   StepProgressEvent,
   StepStatus,
   TransformStep,
   Workflow,
+  WorkflowCancelledEvent,
   WorkflowCompletedEvent,
   WorkflowFailedEvent,
   WorkflowResumedEvent,
   WorkflowRunner,
-  WorkflowStatus
+  WorkflowStatus,
+  computeWorkflowStructureHash,
+  getDefaultSteps
 } from "../dist/index.js";
 import { collectAsync } from "./helpers.mjs";
 
@@ -30,7 +37,7 @@ test("FunctionStep executes with shared workflow context", async () => {
     }
   });
 
-  const output = await step.run({ a: 2, b: 3 }, { workflow_state: {} });
+  const output = await step.run({ a: 2, b: 3 }, { workflowState: {} });
   assert.deepEqual(output, { total: 5 });
   assert.equal(step.status, StepStatus.COMPLETED);
 });
@@ -77,13 +84,13 @@ test("Workflow conditional edges run the matching branch", async () => {
   workflow.addStep(start).addStep(high).addStep(low);
   workflow.setStartStep(start).addEndStep(high).addEndStep(low);
   workflow.addEdge("start", "high", {
-    type: "output_based",
+    type: "outputBased",
     field: "priority",
     operator: "==",
     value: "high"
   });
   workflow.addEdge("start", "low", {
-    type: "output_based",
+    type: "outputBased",
     field: "priority",
     operator: "!=",
     value: "high"
@@ -105,6 +112,83 @@ test("Workflow validation detects cycles and missing endpoints", () => {
   assert.equal(validation.isValid, false);
   assert.equal(validation.hasCycles, true);
   assert.ok(validation.errors.some((error) => error.includes("cycles")));
+});
+
+test("Workflow validation rejects incompatible connected step schemas", () => {
+  const first = new FunctionStep({
+    stepId: "first",
+    metadata: { name: "First" },
+    outputSchema: {
+      type: "object",
+      properties: { value: { type: "string" } },
+      required: ["value"]
+    },
+    func: () => ({ value: "one" })
+  });
+  const second = new FunctionStep({
+    stepId: "second",
+    metadata: { name: "Second" },
+    inputSchema: {
+      type: "object",
+      properties: { value: { type: "integer" } },
+      required: ["value"]
+    },
+    func: () => ({ result: "two" })
+  });
+  const workflow = new Workflow({ metadata: { name: "Types" }, workflowId: "wf_types" });
+  workflow.chain(first, second);
+
+  const validation = workflow.validateWorkflow();
+
+  assert.equal(validation.isValid, false);
+  assert.ok(validation.errors.some((error) => error.includes("Type mismatch")));
+});
+
+test("WorkflowRunner exposes nested execution status", async () => {
+  const step = new FunctionStep({
+    stepId: "only",
+    metadata: { name: "Only" },
+    func: () => ({ result: "done" })
+  });
+  const workflow = new Workflow({ metadata: { name: "Status" }, workflowId: "wf_status" });
+  workflow.addStep(step).setStartStep(step).addEndStep(step);
+
+  const execution = await new WorkflowRunner().run(workflow, {});
+  const status = new WorkflowRunner().getExecutionStatus(execution);
+
+  assert.equal(status.progress.totalSteps, 1);
+  assert.equal(status.progress.completedSteps, 1);
+  assert.equal(status.progress.percentage, 100);
+  assert.ok("timing" in status);
+  assert.equal(status.error, undefined);
+});
+
+test("WorkflowRunner can cancel a registered running workflow", async () => {
+  const step = new FunctionStep({
+    stepId: "slow",
+    metadata: { name: "Slow" },
+    func: async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      return { result: "late" };
+    }
+  });
+  const workflow = new Workflow({ metadata: { name: "Cancel" }, workflowId: "wf_cancel" });
+  workflow.addStep(step).setStartStep(step).addEndStep(step);
+  const runner = new WorkflowRunner();
+  const iterator = runner.runStream(workflow, {});
+  const events = [];
+
+  events.push((await iterator.next()).value);
+  events.push((await iterator.next()).value);
+  assert.equal(await runner.cancelWorkflow("wf_cancel", "test stop"), true);
+
+  for await (const event of iterator) events.push(event);
+
+  const cancelled = events.find((event) => event instanceof WorkflowCancelledEvent);
+  assert.ok(cancelled);
+  assert.equal(cancelled.reason, "test stop");
+  assert.equal(cancelled.execution.status, WorkflowStatus.CANCELLED);
+  assert.equal(await runner.cancelWorkflow("wf_cancel"), false);
 });
 
 test("WorkflowRunner streams progress, edge, checkpoint, and completion events", async () => {
@@ -156,6 +240,50 @@ test("WorkflowRunner emits failure events and marks execution failed", async () 
   assert.equal(failed.execution.status, WorkflowStatus.FAILED);
 });
 
+test("WorkflowRunner validates initial input against start step schema before step execution", async () => {
+  const step = new FunctionStep({
+    stepId: "typed_start",
+    metadata: { name: "Typed Start" },
+    inputSchema: {
+      type: "object",
+      properties: { message: { type: "string" } },
+      required: ["message"]
+    },
+    func: () => ({ result: "ok" })
+  });
+  const workflow = new Workflow({ metadata: { name: "Initial Input Validation" }, workflowId: "wf_initial_input" });
+  workflow.addStep(step).setStartStep(step).addEndStep(step);
+
+  const events = await collectAsync(new WorkflowRunner().runStream(workflow, { other: "value" }));
+
+  const failed = events.find((event) => event instanceof WorkflowFailedEvent);
+  assert.ok(failed);
+  assert.match(failed.error, /Initial input validation failed/);
+  assert.ok(!events.some((event) => event instanceof StepStartedEvent));
+});
+
+test("PicoAgentStep returns error-shaped output instead of failing workflow step", async () => {
+  const agent = {
+    name: "broken-agent",
+    async run() {
+      throw new Error("model unavailable");
+    }
+  };
+  const step = new PicoAgentStep({
+    stepId: "agent_step",
+    metadata: { name: "Agent Step" },
+    agent
+  });
+  const context = new Context();
+
+  const output = await step.execute({ task: "answer" }, context);
+
+  assert.match(output.response, /Error: PicoAgent execution failed: model unavailable/);
+  assert.deepEqual(output.messages, []);
+  assert.equal(output.metadata.agentName, "broken-agent");
+  assert.match(context.get("agent_step_error").error, /model unavailable/);
+});
+
 test("Workflow checkpoints validate and resume compatible executions", async () => {
   const first = new FunctionStep({
     stepId: "first",
@@ -198,6 +326,32 @@ test("Workflow checkpoints validate and resume compatible executions", async () 
   assert.equal(completed.execution.stepExecutions.second.outputData.value, "one two");
 });
 
+test("Workflow structure hash includes declared input and output schemas", () => {
+  const makeStep = (messageType) => new FunctionStep({
+    stepId: "typed",
+    metadata: { name: "Typed" },
+    inputSchema: {
+      type: "object",
+      properties: { message: { type: messageType } },
+      required: ["message"]
+    },
+    outputSchema: {
+      type: "object",
+      properties: { result: { type: "string" } },
+      required: ["result"]
+    },
+    func: () => ({ result: "ok" })
+  });
+
+  const first = makeStep("string");
+  const second = makeStep("integer");
+
+  assert.notEqual(
+    computeWorkflowStructureHash({ typed: first }, [], "typed", ["typed"]),
+    computeWorkflowStructureHash({ typed: second }, [], "typed", ["typed"])
+  );
+});
+
 test("Workflow serialization round-trips graph structure", () => {
   const step = new TransformStep({
     stepId: "format",
@@ -212,4 +366,16 @@ test("Workflow serialization round-trips graph structure", () => {
   assert.deepEqual(Object.keys(restored.steps), ["format"]);
   assert.equal(restored.startStepId, "format");
   assert.deepEqual(restored.endStepIds, ["format"]);
+});
+
+test("Default step templates preserve concrete step config", () => {
+  const [echo, http, transform, agent] = getDefaultSteps();
+
+  assert.equal(echo.provider, "picoagents.workflow.EchoStep");
+  assert.equal(echo.config.prefix, "Processed: ");
+  assert.equal(echo.config.suffix, " (done)");
+  assert.equal(echo.config.delaySeconds, 1);
+  assert.equal(http.config.inputSchema.properties.verify_ssl.default, true);
+  assert.deepEqual(transform.config.mappings, { result: "message" });
+  assert.equal(agent.config.agent.config.modelClient.config.model, "gpt-4.1-mini");
 });

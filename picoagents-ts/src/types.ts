@@ -26,7 +26,7 @@ export class Usage {
       this.costEstimate === undefined && other.costEstimate === undefined
         ? undefined
         : (this.costEstimate ?? 0) + (other.costEstimate ?? 0);
-    return new Usage({
+    return collapseZeroUsage(new Usage({
       durationMs: Math.max(this.durationMs, other.durationMs),
       llmCalls: this.llmCalls + other.llmCalls,
       tokensInput: this.tokensInput + other.tokensInput,
@@ -34,8 +34,24 @@ export class Usage {
       toolCalls: this.toolCalls + other.toolCalls,
       memoryOperations: this.memoryOperations + other.memoryOperations,
       costEstimate: cost
-    });
+    }));
   }
+}
+
+function collapseZeroUsage(usage: Usage): Usage {
+  for (const key of [
+    "llmCalls",
+    "tokensInput",
+    "tokensOutput",
+    "toolCalls",
+    "memoryOperations"
+  ] as const) {
+    if (usage[key] === 0) {
+      (usage as unknown as Record<typeof key, number | undefined>)[key] = undefined;
+    }
+  }
+  if (usage.costEstimate === 0) usage.costEstimate = undefined;
+  return usage;
 }
 
 export interface AgentResponseInit {

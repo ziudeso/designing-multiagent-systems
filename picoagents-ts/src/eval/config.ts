@@ -5,9 +5,6 @@
  * evaluation comparison (model, compaction strategy, system prompt, tools, ...).
  * Ported from Python `eval/_config.py`.
  *
- * Notable deviation from Python: the TS port has no `get_instructions` preset
- * helper, so `instructionPreset` is accepted but only the `systemPrompt` is used
- * as agent instructions.
  */
 
 import { Agent } from "../agents/agent.js";
@@ -20,6 +17,7 @@ import {
 } from "../compaction.js";
 import { registerComponent } from "../componentConfig.js";
 import type { SerializableComponent } from "../componentConfig.js";
+import { getInstructions } from "../instructions.js";
 import {
   AnthropicChatCompletionClient,
   AzureOpenAIChatCompletionClient,
@@ -43,7 +41,7 @@ export interface AgentConfigInit {
   headRatio?: number;
   /** System prompt (default: "You are a helpful assistant."). */
   systemPrompt?: string;
-  /** Instruction preset (accepted for parity; not resolved in the TS port). */
+  /** Instruction preset used to build system instructions. */
   instructionPreset?: string;
   /** Tool categories to include (default: ["coding"]). */
   tools?: string[];
@@ -129,19 +127,19 @@ export class AgentConfig implements SerializableComponent {
   static fromConfig(config: Record<string, unknown>): AgentConfig {
     return new AgentConfig({
       name: String(config.name ?? ""),
-      modelProvider: config.modelProvider as string | undefined,
-      modelName: config.modelName as string | undefined,
-      compaction: config.compaction as string | null | undefined,
-      tokenBudget: config.tokenBudget as number | undefined,
-      headRatio: config.headRatio as number | undefined,
-      systemPrompt: config.systemPrompt as string | undefined,
-      instructionPreset: config.instructionPreset as string | undefined,
+      modelProvider: stringValue(config.modelProvider ?? config.model_provider ?? config.provider),
+      modelName: stringValue(config.modelName ?? config.model_name ?? config.model),
+      compaction: nullableString(config.compaction ?? config.strategy),
+      tokenBudget: numberValue(config.tokenBudget ?? config.token_budget),
+      headRatio: numberValue(config.headRatio ?? config.head_ratio),
+      systemPrompt: stringValue(config.systemPrompt ?? config.system_prompt ?? config.instructions),
+      instructionPreset: stringValue(config.instructionPreset ?? config.instruction_preset),
       tools: config.tools as string[] | undefined,
-      maxIterations: config.maxIterations as number | undefined,
-      temperature: config.temperature as number | undefined,
-      workspace: config.workspace as string | undefined,
-      bashTimeout: config.bashTimeout as number | undefined,
-      extraKwargs: config.extraKwargs as Record<string, unknown> | undefined
+      maxIterations: numberValue(config.maxIterations ?? config.max_iterations),
+      temperature: numberValue(config.temperature),
+      workspace: stringValue(config.workspace),
+      bashTimeout: numberValue(config.bashTimeout ?? config.bash_timeout),
+      extraKwargs: asRecord(config.extraKwargs ?? config.extra_kwargs)
     });
   }
 
@@ -242,7 +240,12 @@ export class AgentConfig implements SerializableComponent {
     const allTools: BaseTool[] = [];
     for (const toolCategory of this.tools) {
       if (toolCategory === "coding") {
-        allTools.push(...createCodingTools(this.workspace ? { workspace: this.workspace } : {}));
+        allTools.push(
+          ...createCodingTools({
+            workspace: this.workspace,
+            bashTimeout: this.bashTimeout
+          })
+        );
       } else if (toolCategory === "core") {
         allTools.push(...createCoreTools());
       }
@@ -260,8 +263,9 @@ export class AgentConfig implements SerializableComponent {
     const compaction = this.createCompaction();
     const tools = this.createTools();
 
-    // The TS port has no instruction-preset resolver; use systemPrompt directly.
-    const instructions = this.systemPrompt;
+    const instructions = this.instructionPreset
+      ? getInstructions(this.instructionPreset, tools.map((tool) => tool.name))
+      : this.systemPrompt;
 
     return new Agent({
       name: this.name,
@@ -286,3 +290,24 @@ export class AgentConfig implements SerializableComponent {
 }
 
 registerComponent(AgentConfig as any);
+
+function stringValue(value: unknown): string | undefined {
+  return value === undefined || value === null ? undefined : String(value);
+}
+
+function nullableString(value: unknown): string | null | undefined {
+  if (value === null) return null;
+  return stringValue(value);
+}
+
+function numberValue(value: unknown): number | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : undefined;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}

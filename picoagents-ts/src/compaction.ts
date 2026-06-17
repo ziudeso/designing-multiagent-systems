@@ -11,8 +11,9 @@
  * tool_calls must stay together with its corresponding ToolMessage results.
  * Splitting these causes provider API errors.
  *
- * Token counting in Python uses tiktoken; here we approximate with a `len/4`
- * char-based estimate (matching the precedent in `src/termination/index.ts`).
+ * Token counting in Python uses tiktoken when available; here we approximate
+ * with a `len/4` char-based estimate and the same per-message overhead used by
+ * Python's tokenizer-backed path.
  *
  * Ported from Python `compaction.py`.
  */
@@ -46,8 +47,8 @@ function pickMessages(messages: Message[], indices: number[]): Message[] {
 function countTokens(messages: Message[]): number {
   let total = 0;
   for (const msg of messages) {
-    // Role overhead, approximately matching Python's "+ 10" per message.
-    total += 10;
+    // Role overhead, approximately matching Python's tokenizer-backed "+ 4".
+    total += 4;
     const content = msg.content ?? "";
     total += Math.floor(String(content).length / 4);
 

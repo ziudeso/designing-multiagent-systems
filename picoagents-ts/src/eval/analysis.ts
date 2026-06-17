@@ -67,8 +67,8 @@ export function formatSummaryTable(results: EvalResults, baseline?: string): str
     const filesStr = String(summary.totalUniqueFiles);
     const dupesStr = String(summary.totalDuplicateReads);
 
-    if (!comp.is_baseline) {
-      const tokenPct = (comp.token_diff_pct as number) ?? 0;
+    if (!comp.isBaseline) {
+      const tokenPct = (comp.tokenDiffPct as number) ?? 0;
       if (tokenPct !== 0) tokensStr += ` (${signed(tokenPct, 0)}%)`;
     }
 
@@ -84,10 +84,10 @@ export function formatSummaryTable(results: EvalResults, baseline?: string): str
     lines.push(`vs ${baseline || results.targetNames[0]}:`);
     for (const targetName of results.targetNames) {
       const comp = comparison[targetName] ?? {};
-      if (comp.is_baseline) continue;
-      const tokenDiff = (comp.token_diff_pct as number) ?? 0;
-      const scoreDiff = (comp.score_diff as number) ?? 0;
-      const iterDiff = (comp.iteration_diff_pct as number) ?? 0;
+      if (comp.isBaseline) continue;
+      const tokenDiff = (comp.tokenDiffPct as number) ?? 0;
+      const scoreDiff = (comp.scoreDiff as number) ?? 0;
+      const iterDiff = (comp.iterationDiffPct as number) ?? 0;
       lines.push(
         `  ${targetName}: ` +
           `${signed(tokenDiff, 1)}% tokens, ` +
@@ -202,7 +202,7 @@ export function formatTokenGrowth(results: EvalResults, taskId?: string): string
 
     lines.push(`\n${targetName}:`);
 
-    const tokenGrowth = (result.metrics.token_growth as Array<[number, number]>) ?? [];
+    const tokenGrowth = (result.metrics.tokenGrowth as Array<[number, number]>) ?? [];
     if (!tokenGrowth.length) {
       lines.push("  No iteration data available");
       continue;

@@ -3,7 +3,7 @@ import type { AgentEvent } from "../types.js";
 import type { Message } from "../messages.js";
 
 export type JSONSchema = {
-  type?: string;
+  type?: string | string[];
   description?: string;
   properties?: Record<string, JSONSchema>;
   required?: string[];
@@ -81,7 +81,8 @@ export abstract class BaseTool {
     for (const [name, value] of Object.entries(params)) {
       const property = properties[name];
       if (!property?.type) continue;
-      if (!checkJsonType(value, property.type)) return false;
+      const expectedTypes = Array.isArray(property.type) ? property.type : [property.type];
+      if (!expectedTypes.some((expected) => checkJsonType(value, expected))) return false;
     }
     return true;
   }

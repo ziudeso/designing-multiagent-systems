@@ -4,6 +4,7 @@ import { CancellationToken } from "../cancellation.js";
 import {
   ComponentModel,
   dumpComponent,
+  loadComponent,
   registerComponent
 } from "../componentConfig.js";
 import {
@@ -14,7 +15,7 @@ import {
   computeWorkflowStructureHash
 } from "./checkpoint.js";
 import { coerceValueToSchemaType } from "./schemaUtils.js";
-import type { JsonSchema } from "./schemaUtils.js";
+import type { JsonSchema, JsonSchemaField } from "./schemaUtils.js";
 
 export {
   CheckpointConfig,
@@ -66,11 +67,11 @@ export enum WorkflowStatus {
 }
 
 export interface EdgeCondition {
-  type?: "always" | "output_based" | "state_based";
+  type?: "always" | "outputBased" | "stateBased";
   expression?: string;
   field?: string;
   value?: unknown;
-  operator?: "==" | "!=" | ">" | "<" | ">=" | "<=" | "in" | "not_in";
+  operator?: "==" | "!=" | ">" | "<" | ">=" | "<=" | "in" | "notIn";
 }
 
 export class Edge {
@@ -79,11 +80,11 @@ export class Edge {
   toStep: string;
   condition: EdgeCondition;
 
-  constructor(init: { fromStep: string; toStep: string; condition?: EdgeCondition; id?: string }) {
+  constructor(init: { fromStep: string; toStep: string; condition?: EdgeCondition | Record<string, unknown>; id?: string }) {
     this.id = init.id ?? randomUUID();
     this.fromStep = init.fromStep;
     this.toStep = init.toStep;
-    this.condition = init.condition ?? { type: "always" };
+    this.condition = normalizeEdgeCondition(init.condition);
   }
 }
 
@@ -152,7 +153,7 @@ export class Context {
   }
 
   toDict(): Record<string, unknown> {
-    return { workflow_state: this.state, ...this.state };
+    return { workflowState: this.state, ...this.state };
   }
 }
 
@@ -331,6 +332,8 @@ export abstract class BaseStep<Input extends Record<string, unknown> = Record<st
   inputValidator?: Validator<Input>;
   outputValidator?: Validator<Output>;
   /** Optional declared JSON schemas, used for output coercion and structure hashing. */
+  inputTypeName?: string;
+  outputTypeName?: string;
   inputSchema?: JsonSchema;
   outputSchema?: JsonSchema;
 
@@ -339,6 +342,8 @@ export abstract class BaseStep<Input extends Record<string, unknown> = Record<st
     metadata: StepMetadata;
     inputValidator?: Validator<Input>;
     outputValidator?: Validator<Output>;
+    inputTypeName?: string;
+    outputTypeName?: string;
     inputSchema?: JsonSchema;
     outputSchema?: JsonSchema;
   }) {
@@ -352,6 +357,8 @@ export abstract class BaseStep<Input extends Record<string, unknown> = Record<st
     };
     this.inputValidator = init.inputValidator;
     this.outputValidator = init.outputValidator;
+    this.inputTypeName = init.inputTypeName;
+    this.outputTypeName = init.outputTypeName;
     this.inputSchema = init.inputSchema;
     this.outputSchema = init.outputSchema;
   }
@@ -366,10 +373,12 @@ export abstract class BaseStep<Input extends Record<string, unknown> = Record<st
 
     while (attempt <= this.metadata.maxRetries) {
       try {
-        const input = this.inputValidator ? this.inputValidator(inputData) : (inputData as Input);
-        const context = contextData._context_obj instanceof Context
-          ? contextData._context_obj
-          : Context.fromStateRef((contextData.workflow_state as Record<string, unknown>) ?? {});
+        const input = this.validateInputData(inputData);
+        const contextObject = contextData.contextObject ?? contextData._context_obj;
+        const workflowState = contextData.workflowState ?? contextData.workflow_state;
+        const context = contextObject instanceof Context
+          ? contextObject
+          : Context.fromStateRef((workflowState as Record<string, unknown>) ?? {});
         const operation = Promise.resolve(this.execute(input, context));
         const output = this.metadata.timeoutSeconds
           ? await withTimeout(operation, this.metadata.timeoutSeconds * 1000, `Step ${this.stepId} timed out after ${this.metadata.timeoutSeconds}s`)
@@ -421,6 +430,16 @@ export abstract class BaseStep<Input extends Record<string, unknown> = Record<st
     }
     return output;
   }
+
+  validateInputData(inputData: Record<string, unknown>): Input {
+    if (this.inputValidator) {
+      return this.inputValidator(inputData);
+    }
+    if (this.inputSchema) {
+      return validateAndCoerceBySchema(inputData, this.inputSchema) as Input;
+    }
+    return inputData as Input;
+  }
 }
 
 export class FunctionStep<Input extends Record<string, unknown>, Output extends Record<string, unknown>> extends BaseStep<Input, Output> {
@@ -439,6 +458,10 @@ export class FunctionStep<Input extends Record<string, unknown>, Output extends 
 }
 
 export class EchoStep extends BaseStep {
+  static componentType = "step" as const;
+  static componentProvider = "picoagents.workflow.EchoStep";
+  static componentVersion = 1;
+
   prefix: string;
   suffix: string;
   delaySeconds: number;
@@ -450,10 +473,44 @@ export class EchoStep extends BaseStep {
     suffix?: string;
     delaySeconds?: number;
   }) {
-    super({ stepId: init.stepId, metadata: init.metadata });
+    super({
+      stepId: init.stepId,
+      metadata: init.metadata,
+      inputTypeName: "Record",
+      outputTypeName: "Record"
+    });
     this.prefix = init.prefix ?? "Echo: ";
     this.suffix = init.suffix ?? "";
     this.delaySeconds = init.delaySeconds ?? 0;
+  }
+
+  static fromConfig(config: Record<string, unknown> = {}): EchoStep {
+    const step = new EchoStep({
+      stepId: String(config.stepId ?? config.step_id ?? ""),
+      metadata: (config.metadata as StepMetadata) ?? { name: String(config.stepId ?? config.step_id ?? "Echo") },
+      prefix: config.prefix as string | undefined,
+      suffix: config.suffix as string | undefined,
+      delaySeconds: numberOrUndefined(config.delaySeconds ?? config.delay_seconds)
+    });
+    step.inputSchema = config.inputSchema as JsonSchema | undefined;
+    step.outputSchema = config.outputSchema as JsonSchema | undefined;
+    step.inputTypeName = (config.inputTypeName ?? config.input_type_name ?? step.inputTypeName) as string | undefined;
+    step.outputTypeName = (config.outputTypeName ?? config.output_type_name ?? step.outputTypeName) as string | undefined;
+    return step;
+  }
+
+  toConfig(): Record<string, unknown> {
+    return {
+      stepId: this.stepId,
+      metadata: this.metadata,
+      prefix: this.prefix,
+      suffix: this.suffix,
+      delaySeconds: this.delaySeconds,
+      inputTypeName: this.inputTypeName,
+      outputTypeName: this.outputTypeName,
+      inputSchema: this.inputSchema,
+      outputSchema: this.outputSchema
+    };
   }
 
   async execute(inputData: Record<string, unknown>, context: Context): Promise<Record<string, unknown>> {
@@ -479,27 +536,58 @@ export interface HttpRequestInput extends Record<string, unknown> {
   headers?: Record<string, string>;
   data?: unknown;
   timeout?: number;
+  verifySsl?: boolean;
+  verify_ssl?: boolean;
 }
 
 export interface HttpResponseOutput extends Record<string, unknown> {
-  status_code: number;
+  statusCode: number;
   content: string;
   headers: Record<string, string>;
   url: string;
   encoding?: string;
-  elapsed_time: number;
+  elapsedTime: number;
 }
 
 export class HttpStep extends BaseStep<HttpRequestInput, HttpResponseOutput> {
+  static componentType = "step" as const;
+  static componentProvider = "picoagents.workflow.HttpStep";
+  static componentVersion = 1;
+
   constructor(init: { stepId: string; metadata: StepMetadata }) {
     super({
       stepId: init.stepId,
       metadata: init.metadata,
+      inputTypeName: "HttpRequestInput",
+      outputTypeName: "HttpResponseOutput",
       inputValidator: (value) => {
         if (!value.url || typeof value.url !== "string") throw new Error("url is required");
         return value as HttpRequestInput;
       }
     });
+  }
+
+  static fromConfig(config: Record<string, unknown> = {}): HttpStep {
+    const step = new HttpStep({
+      stepId: String(config.stepId ?? config.step_id ?? ""),
+      metadata: (config.metadata as StepMetadata) ?? { name: String(config.stepId ?? config.step_id ?? "HTTP") }
+    });
+    step.inputSchema = config.inputSchema as JsonSchema | undefined;
+    step.outputSchema = config.outputSchema as JsonSchema | undefined;
+    step.inputTypeName = (config.inputTypeName ?? config.input_type_name ?? step.inputTypeName) as string | undefined;
+    step.outputTypeName = (config.outputTypeName ?? config.output_type_name ?? step.outputTypeName) as string | undefined;
+    return step;
+  }
+
+  toConfig(): Record<string, unknown> {
+    return {
+      stepId: this.stepId,
+      metadata: this.metadata,
+      inputTypeName: this.inputTypeName,
+      outputTypeName: this.outputTypeName,
+      inputSchema: this.inputSchema,
+      outputSchema: this.outputSchema
+    };
   }
 
   async execute(inputData: HttpRequestInput, context: Context): Promise<HttpResponseOutput> {
@@ -518,20 +606,20 @@ export class HttpStep extends BaseStep<HttpRequestInput, HttpResponseOutput> {
       context.set(`${this.stepId}_request_info`, {
         url: inputData.url,
         method: inputData.method ?? "GET",
-        status_code: response.status,
-        elapsed_time: elapsed,
-        content_length: content.length
+        statusCode: response.status,
+        elapsedTime: elapsed,
+        contentLength: content.length
       });
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}: ${content.slice(0, 200)}`);
       }
       return {
-        status_code: response.status,
+        statusCode: response.status,
         content,
         headers: Object.fromEntries(response.headers.entries()),
         url: response.url,
         encoding: response.headers.get("content-encoding") ?? undefined,
-        elapsed_time: elapsed
+        elapsedTime: elapsed
       };
     } finally {
       clearTimeout(timeout);
@@ -540,6 +628,10 @@ export class HttpStep extends BaseStep<HttpRequestInput, HttpResponseOutput> {
 }
 
 export class TransformStep extends BaseStep {
+  static componentType = "step" as const;
+  static componentProvider = "picoagents.workflow.TransformStep";
+  static componentVersion = 1;
+
   mappings: Record<string, unknown>;
 
   constructor(init: {
@@ -552,10 +644,32 @@ export class TransformStep extends BaseStep {
     super({
       stepId: init.stepId,
       metadata: init.metadata,
+      inputTypeName: init.inputSchema?.title as string | undefined,
+      outputTypeName: init.outputSchema?.title as string | undefined,
       inputSchema: init.inputSchema,
       outputSchema: init.outputSchema
     });
     this.mappings = init.mappings ?? {};
+  }
+
+  static fromConfig(config: Record<string, unknown> = {}): TransformStep {
+    return new TransformStep({
+      stepId: String(config.stepId ?? config.step_id ?? ""),
+      metadata: (config.metadata as StepMetadata) ?? { name: String(config.stepId ?? config.step_id ?? "Transform") },
+      mappings: (config.mappings as Record<string, unknown>) ?? {},
+      inputSchema: config.inputSchema as JsonSchema | undefined,
+      outputSchema: config.outputSchema as JsonSchema | undefined
+    });
+  }
+
+  toConfig(): Record<string, unknown> {
+    return {
+      stepId: this.stepId,
+      metadata: this.metadata,
+      mappings: this.mappings,
+      inputSchema: this.inputSchema,
+      outputSchema: this.outputSchema
+    };
   }
 
   execute(inputData: Record<string, unknown>): Record<string, unknown> {
@@ -592,7 +706,10 @@ export class TransformStep extends BaseStep {
 
 export interface PicoAgentInput extends Record<string, unknown> {
   task: string;
+  additionalContext?: Record<string, unknown>;
   additional_context?: Record<string, unknown>;
+  outputTaskMessages?: boolean;
+  output_task_messages?: boolean;
 }
 
 export interface PicoAgentOutput extends Record<string, unknown> {
@@ -603,12 +720,18 @@ export interface PicoAgentOutput extends Record<string, unknown> {
 }
 
 export class PicoAgentStep extends BaseStep<PicoAgentInput, PicoAgentOutput> {
+  static componentType = "step" as const;
+  static componentProvider = "picoagents.workflow.PicoAgentStep";
+  static componentVersion = 1;
+
   agent: Agent;
 
   constructor(init: { stepId: string; metadata: StepMetadata; agent: Agent }) {
     super({
       stepId: init.stepId,
       metadata: init.metadata,
+      inputTypeName: "PicoAgentInput",
+      outputTypeName: "PicoAgentOutput",
       inputValidator: (value) => {
         if (!value.task || typeof value.task !== "string") throw new Error("task is required");
         return value as PicoAgentInput;
@@ -617,34 +740,84 @@ export class PicoAgentStep extends BaseStep<PicoAgentInput, PicoAgentOutput> {
     this.agent = init.agent;
   }
 
+  static fromConfig(config: Record<string, unknown> = {}): PicoAgentStep {
+    const step = new PicoAgentStep({
+      stepId: String(config.stepId ?? config.step_id ?? ""),
+      metadata: (config.metadata as StepMetadata) ?? { name: String(config.stepId ?? config.step_id ?? "Agent") },
+      agent: loadComponent(config.agent as ComponentModel) as Agent
+    });
+    step.inputSchema = config.inputSchema as JsonSchema | undefined;
+    step.outputSchema = config.outputSchema as JsonSchema | undefined;
+    step.inputTypeName = (config.inputTypeName ?? config.input_type_name ?? step.inputTypeName) as string | undefined;
+    step.outputTypeName = (config.outputTypeName ?? config.output_type_name ?? step.outputTypeName) as string | undefined;
+    return step;
+  }
+
+  toConfig(): Record<string, unknown> {
+    return {
+      stepId: this.stepId,
+      metadata: this.metadata,
+      agent: dumpComponent(this.agent),
+      inputTypeName: this.inputTypeName,
+      outputTypeName: this.outputTypeName,
+      inputSchema: this.inputSchema,
+      outputSchema: this.outputSchema
+    };
+  }
+
   async execute(inputData: PicoAgentInput, context: Context): Promise<PicoAgentOutput> {
+    const additionalContext =
+      inputData.additionalContext ??
+      (inputData as Record<string, unknown>).additional_context as Record<string, unknown> | undefined;
     context.set(`${this.stepId}_request_info`, {
       agentName: this.agent.name,
       task: inputData.task,
       timestamp: new Date().toISOString(),
-      additionalContext: inputData.additional_context
+      additionalContext
     });
-    const result = await this.agent.run(inputData.task);
-    const finalMessage = [...result.messages].reverse().find((message) => message.role === "assistant") ?? result.messages.at(-1);
-    const messages = result.messages.map((message) => ({
-      role: message.role,
-      content: message.content,
-      source: message.source,
-      timestamp: message.timestamp.toISOString()
-    }));
-    return {
-      response: finalMessage?.content ?? "No response generated",
-      messages,
-      usage: { ...result.usage },
-      metadata: {
-        agentName: this.agent.name,
-        messageCount: result.messages.length,
-        elapsedTime: result.usage.durationMs / 1000,
-        llmCalls: result.usage.llmCalls,
-        tokensTotal: result.usage.tokensInput + result.usage.tokensOutput,
-        executionTimestamp: new Date().toISOString()
-      }
-    };
+    try {
+      const result = await this.agent.run(inputData.task);
+      const finalMessage = [...result.messages].reverse().find((message) => message.role === "assistant") ?? result.messages.at(-1);
+      const includeMessages = inputData.outputTaskMessages ?? inputData.output_task_messages ?? true;
+      const messages = includeMessages ? result.messages.map((message) => ({
+        role: message.role,
+        content: message.content,
+        source: message.source,
+        timestamp: message.timestamp.toISOString()
+      })) : [];
+      const output = {
+        response: finalMessage?.content ?? "No response generated",
+        messages,
+        usage: { ...result.usage },
+        metadata: {
+          agentName: this.agent.name,
+          messageCount: result.messages.length,
+          elapsedTime: result.usage.durationMs / 1000,
+          llmCalls: result.usage.llmCalls,
+          tokensTotal: result.usage.tokensInput + result.usage.tokensOutput,
+          executionTimestamp: new Date().toISOString(),
+          ...(additionalContext ? { additionalContext } : {})
+        }
+      };
+      context.set(`${this.stepId}_output`, output);
+      return output;
+    } catch (error) {
+      const message = `PicoAgent execution failed: ${error instanceof Error ? error.message : String(error)}`;
+      context.set(`${this.stepId}_error`, {
+        error: message,
+        timestamp: new Date().toISOString()
+      });
+      return {
+        response: `Error: ${message}`,
+        messages: [],
+        usage: {},
+        metadata: {
+          agentName: this.agent.name,
+          error: message,
+          executionTimestamp: new Date().toISOString()
+        }
+      };
+    }
   }
 }
 
@@ -755,14 +928,14 @@ export class Workflow {
   }
 
   evaluateEdgeCondition(edge: Edge, execution: WorkflowExecution): boolean {
-    const condition = edge.condition;
+    const condition = normalizeEdgeCondition(edge.condition);
     if (!condition.type || condition.type === "always") return true;
-    if (condition.type === "output_based") {
+    if (condition.type === "outputBased") {
       const output = execution.stepExecutions[edge.fromStep]?.outputData;
       if (!output || !condition.field || !condition.operator) return false;
       return compareValues(output[condition.field], condition.operator, condition.value);
     }
-    if (condition.type === "state_based") {
+    if (condition.type === "stateBased") {
       if (!condition.field || !condition.operator) return false;
       return compareValues(execution.state[condition.field], condition.operator, condition.value);
     }
@@ -793,6 +966,8 @@ export class Workflow {
     errors.push(...conditional.errors);
     warnings.push(...conditional.warnings);
 
+    errors.push(...this.validateTypeCompatibility());
+
     return {
       isValid: errors.length === 0,
       errors,
@@ -800,6 +975,22 @@ export class Workflow {
       hasCycles,
       unreachableSteps
     };
+  }
+
+  /** Validate declared input/output compatibility across connected steps. */
+  private validateTypeCompatibility(): string[] {
+    const errors: string[] = [];
+    for (const edge of this.edges) {
+      const fromStep = this.steps[edge.fromStep];
+      const toStep = this.steps[edge.toStep];
+      if (!fromStep || !toStep) continue;
+      if (areStepTypesCompatible(fromStep, toStep)) continue;
+      errors.push(
+        `Type mismatch: Step '${edge.fromStep}' outputs ${stepTypeLabel(fromStep, "output")} ` +
+          `but step '${edge.toStep}' expects ${stepTypeLabel(toStep, "input")}`
+      );
+    }
+    return errors;
   }
 
   /** Validate conditional edge logic for common issues. */
@@ -850,7 +1041,7 @@ export class Workflow {
     const fieldConditions: Record<string, Array<{ fromStep: string; condition: EdgeCondition }>> = {};
     for (const edge of edges) {
       const condition = edge.condition;
-      if ((condition.type === "output_based" || condition.type === "state_based") && condition.field) {
+      if ((condition.type === "outputBased" || condition.type === "stateBased") && condition.field) {
         const key = `${condition.type}:${condition.field}`;
         (fieldConditions[key] ??= []).push({ fromStep: edge.fromStep, condition });
       }
@@ -913,7 +1104,7 @@ export class Workflow {
     for (const edge of incoming) {
       if (this.canReachStepConditionally(edge.fromStep, visiting)) {
         const type = edge.condition.type ?? "always";
-        if (type === "always" || type === "output_based" || type === "state_based") {
+        if (type === "always" || type === "outputBased" || type === "stateBased") {
           return true;
         }
       }
@@ -929,6 +1120,8 @@ export class Workflow {
         stepId: step.stepId,
         type: step.constructor.name,
         metadata: step.metadata,
+        inputTypeName: step.inputTypeName,
+        outputTypeName: step.outputTypeName,
         inputSchema: step.inputSchema,
         outputSchema: step.outputSchema
       };
@@ -997,21 +1190,25 @@ export class Workflow {
   /**
    * Serialize the workflow's primitive structure to a config object.
    *
-   * Steps are serialized as lightweight descriptors (id, class name, metadata,
-   * and any declared schemas). This is a pragmatic round-trip of structure;
-   * step execution logic that lives in closures is not reconstructed.
+   * Registered concrete steps are serialized as component models. Steps that
+   * cannot represent their behavior as JSON, such as closure-backed FunctionStep
+   * instances, fall back to lightweight descriptors that preserve structure.
    */
   toConfig(): Record<string, unknown> {
     return {
       workflowId: this.id,
       metadata: this.metadata,
-      steps: Object.values(this.steps).map((step) => ({
-        stepId: step.stepId,
-        type: step.constructor.name,
-        metadata: step.metadata,
-        inputSchema: step.inputSchema,
-        outputSchema: step.outputSchema
-      })),
+      steps: Object.values(this.steps).map((step) =>
+        tryDumpWorkflowComponent(step) ?? {
+          stepId: step.stepId,
+          type: step.constructor.name,
+          metadata: step.metadata,
+          inputTypeName: step.inputTypeName,
+          outputTypeName: step.outputTypeName,
+          inputSchema: step.inputSchema,
+          outputSchema: step.outputSchema
+        }
+      ),
       edges: this.edges.map((edge) => ({
         id: edge.id,
         fromStep: edge.fromStep,
@@ -1032,9 +1229,9 @@ export class Workflow {
   /**
    * Rebuild a workflow from a config produced by {@link toConfig}.
    *
-   * Reconstructs metadata, edges and start/end step ids. Steps are restored as
-   * generic placeholder steps preserving id/metadata/schemas (concrete step
-   * behavior is not serialized in this pragmatic implementation).
+   * Reconstructs metadata, edges and start/end step ids. Registered component
+   * steps are rebuilt with behavior; descriptor-only steps are restored as
+   * placeholders preserving id/metadata/schemas.
    */
   static fromConfig(config: Record<string, unknown>): Workflow {
     const metadata = (config.metadata as WorkflowMetadata) ?? { name: "Workflow" };
@@ -1046,13 +1243,17 @@ export class Workflow {
 
     const steps = (config.steps as Array<Record<string, unknown>> | undefined) ?? [];
     for (const stepConfig of steps) {
-      const step = new ConfigPlaceholderStep({
-        stepId: stepConfig.stepId as string,
-        metadata: (stepConfig.metadata as StepMetadata) ?? { name: stepConfig.stepId as string },
-        originalType: (stepConfig.type as string) ?? "BaseStep",
-        inputSchema: stepConfig.inputSchema as JsonSchema | undefined,
-        outputSchema: stepConfig.outputSchema as JsonSchema | undefined
-      });
+      const step = isComponentModel(stepConfig)
+        ? (loadComponent(stepConfig as ComponentModel) as unknown as BaseStep)
+        : new ConfigPlaceholderStep({
+            stepId: stepConfig.stepId as string,
+            metadata: (stepConfig.metadata as StepMetadata) ?? { name: stepConfig.stepId as string },
+            originalType: (stepConfig.type as string) ?? "BaseStep",
+            inputTypeName: stepConfig.inputTypeName as string | undefined,
+            outputTypeName: stepConfig.outputTypeName as string | undefined,
+            inputSchema: stepConfig.inputSchema as JsonSchema | undefined,
+            outputSchema: stepConfig.outputSchema as JsonSchema | undefined
+          });
       workflow.addStep(step);
     }
 
@@ -1086,12 +1287,16 @@ export class ConfigPlaceholderStep extends BaseStep {
     stepId: string;
     metadata: StepMetadata;
     originalType: string;
+    inputTypeName?: string;
+    outputTypeName?: string;
     inputSchema?: JsonSchema;
     outputSchema?: JsonSchema;
   }) {
     super({
       stepId: init.stepId,
       metadata: init.metadata,
+      inputTypeName: init.inputTypeName,
+      outputTypeName: init.outputTypeName,
       inputSchema: init.inputSchema,
       outputSchema: init.outputSchema
     });
@@ -1103,10 +1308,16 @@ export class ConfigPlaceholderStep extends BaseStep {
   }
 }
 
+registerComponent(EchoStep as any);
+registerComponent(HttpStep as any);
+registerComponent(TransformStep as any);
+registerComponent(PicoAgentStep as any);
 registerComponent(Workflow as any);
 
 export class WorkflowRunner {
   maxConcurrentSteps: number;
+  private cancellationTokens = new Map<string, CancellationToken>();
+  private cancellationReasons = new Map<string, string>();
 
   constructor(maxConcurrentSteps = 5) {
     this.maxConcurrentSteps = maxConcurrentSteps;
@@ -1180,6 +1391,10 @@ export class WorkflowRunner {
       cancellationToken = cancellationTokenArg;
     }
 
+    cancellationToken ??= new CancellationToken();
+    this.cancellationTokens.set(workflow.id, cancellationToken);
+
+    try {
     let execution: WorkflowExecution;
 
     // ---- Checkpoint resume vs. fresh start ----
@@ -1203,6 +1418,22 @@ export class WorkflowRunner {
       if (!validation.isValid) {
         yield new WorkflowFailedEvent(workflow.id, `Workflow validation failed: ${validation.errors.join("; ")}`);
         return;
+      }
+      if (Object.keys(initialInput).length > 0 && workflow.startStepId) {
+        const startStep = workflow.steps[workflow.startStepId];
+        if (startStep) {
+          try {
+            startStep.validateInputData(initialInput);
+          } catch (error) {
+            const message =
+              error instanceof Error ? error.message : String(error);
+            yield new WorkflowFailedEvent(
+              workflow.id,
+              `Initial input validation failed: Input does not match start step '${workflow.startStepId}': ${message}`
+            );
+            return;
+          }
+        }
       }
       execution = {
         id: randomUUID(),
@@ -1229,17 +1460,18 @@ export class WorkflowRunner {
       while (completed.size < Object.keys(workflow.steps).length) {
         // Granular cancellation check before dispatching any new steps.
         if (cancellationToken?.isCancelled()) {
+          const reason = this.cancellationReasons.get(workflow.id) ?? "Cancelled by user";
           // Mark currently-running steps as CANCELLED and emit a failed event per step.
           for (const stepId of runningStepIds) {
             const stepExecution = execution.stepExecutions[stepId];
             if (stepExecution && stepExecution.status === StepStatus.RUNNING) {
               stepExecution.status = StepStatus.CANCELLED;
               stepExecution.endTime = new Date();
-              stepExecution.error = "Step cancelled due to workflow cancellation";
+              stepExecution.error = reason;
               yield new StepFailedEvent(
                 workflow.id,
                 stepId,
-                "Step cancelled due to workflow cancellation",
+                reason,
                 durationSeconds(stepExecution)
               );
             }
@@ -1247,7 +1479,7 @@ export class WorkflowRunner {
           runningStepIds.clear();
           execution.status = WorkflowStatus.CANCELLED;
           execution.endTime = new Date();
-          yield new WorkflowCancelledEvent(workflow.id, execution, "Cancelled by user");
+          yield new WorkflowCancelledEvent(workflow.id, execution, reason);
           return;
         }
 
@@ -1267,7 +1499,10 @@ export class WorkflowRunner {
         // Dispatch all ready steps; emit STEP_STARTED synchronously for each.
         // Each step promise is keyed so the resolved one can be removed from the
         // pending set after it wins a race.
-        type RaceWinner = { kind: "step"; key: string; result: StepResult } | { kind: "drain" };
+        type RaceWinner =
+          | { kind: "step"; key: string; result: StepResult }
+          | { kind: "drain" }
+          | { kind: "cancelled" };
         const pending = new Map<string, Promise<RaceWinner>>();
         let keyCounter = 0;
         for (const stepId of ready) {
@@ -1290,9 +1525,9 @@ export class WorkflowRunner {
           const key = `step_${keyCounter++}`;
           const tagged: Promise<RaceWinner> = step
             .run(inputData, {
-              workflow_state: execution.state,
-              _context_obj: context,
-              cancellation_token: cancellationToken
+              workflowState: execution.state,
+              contextObject: context,
+              cancellationToken
             })
             .then((outputData): StepResult => ({ stepId, status: "fulfilled", outputData }))
             .catch((error): StepResult => ({ stepId, status: "rejected", error }))
@@ -1307,11 +1542,45 @@ export class WorkflowRunner {
           const drainPromise: Promise<RaceWinner> = progressQueue
             .wait()
             .then((): RaceWinner => ({ kind: "drain" }));
-          const winner = await Promise.race([...pending.values(), drainPromise]);
+          let cleanupCancellationWait: (() => void) | undefined;
+          const cancellationPromise: Promise<RaceWinner> | undefined = cancellationToken
+            ? new Promise((resolve) => {
+                cleanupCancellationWait = cancellationToken!.addCallback(() => resolve({ kind: "cancelled" }));
+              })
+            : undefined;
+          const winner = await Promise.race([
+            ...pending.values(),
+            drainPromise,
+            ...(cancellationPromise ? [cancellationPromise] : [])
+          ]);
+          cleanupCancellationWait?.();
 
           // Drain and yield any queued progress events promptly.
           for (const progressEvent of progressQueue.drain()) {
             yield progressEvent;
+          }
+
+          if (winner.kind === "cancelled") {
+            const reason = this.cancellationReasons.get(workflow.id) ?? "Cancelled by user";
+            for (const stepId of runningStepIds) {
+              const stepExecution = execution.stepExecutions[stepId];
+              if (stepExecution && stepExecution.status === StepStatus.RUNNING) {
+                stepExecution.status = StepStatus.CANCELLED;
+                stepExecution.endTime = new Date();
+                stepExecution.error = reason;
+                yield new StepFailedEvent(
+                  workflow.id,
+                  stepId,
+                  reason,
+                  durationSeconds(stepExecution)
+                );
+              }
+            }
+            runningStepIds.clear();
+            execution.status = WorkflowStatus.CANCELLED;
+            execution.endTime = new Date();
+            yield new WorkflowCancelledEvent(workflow.id, execution, reason);
+            return;
           }
 
           if (winner.kind === "step") {
@@ -1400,6 +1669,12 @@ export class WorkflowRunner {
       execution.error = error instanceof Error ? error.message : String(error);
       yield new WorkflowFailedEvent(workflow.id, execution.error, execution);
     }
+    } finally {
+      if (this.cancellationTokens.get(workflow.id) === cancellationToken) {
+        this.cancellationTokens.delete(workflow.id);
+      }
+      this.cancellationReasons.delete(workflow.id);
+    }
   }
 
   /** Validate whether a checkpoint is compatible with a workflow. */
@@ -1460,18 +1735,78 @@ export class WorkflowRunner {
     return step.run(inputData, context);
   }
 
+  async cancelWorkflow(workflowId: string, reason = "Cancelled by user"): Promise<boolean> {
+    const cancellationToken = this.cancellationTokens.get(workflowId);
+    if (!cancellationToken || cancellationToken.isCancelled()) return false;
+    this.cancellationReasons.set(workflowId, reason);
+    cancellationToken.cancel();
+    return true;
+  }
+
   getExecutionStatus(execution: WorkflowExecution): Record<string, unknown> {
     const values = Object.values(execution.stepExecutions);
+    const totalSteps = values.length;
+    const completedSteps = values.filter((step) => step.status === StepStatus.COMPLETED).length;
+    const failedSteps = values.filter((step) => step.status === StepStatus.FAILED).length;
+    const runningSteps = values.filter((step) => step.status === StepStatus.RUNNING).length;
+    const durationSeconds =
+      execution.startTime && execution.endTime
+        ? (execution.endTime.getTime() - execution.startTime.getTime()) / 1000
+        : undefined;
     return {
       executionId: execution.id,
       workflowId: execution.workflowId,
       status: execution.status,
-      totalSteps: values.length,
-      completedSteps: values.filter((step) => step.status === StepStatus.COMPLETED).length,
-      failedSteps: values.filter((step) => step.status === StepStatus.FAILED).length,
-      runningSteps: values.filter((step) => step.status === StepStatus.RUNNING).length
+      progress: {
+        totalSteps,
+        completedSteps,
+        failedSteps,
+        runningSteps,
+        percentage: totalSteps > 0 ? (completedSteps / totalSteps) * 100 : 0
+      },
+      timing: {
+        startTime: execution.startTime,
+        endTime: execution.endTime,
+        durationSeconds
+      },
+      error: execution.error,
+      totalSteps,
+      completedSteps,
+      failedSteps,
+      runningSteps
     };
   }
+}
+
+function normalizeEdgeCondition(condition?: EdgeCondition | Record<string, unknown>): EdgeCondition {
+  if (!condition) return { type: "always" };
+  const rawType = condition.type;
+  const rawOperator = condition.operator;
+  const type =
+    rawType === "output_based"
+      ? "outputBased"
+      : rawType === "state_based"
+        ? "stateBased"
+        : rawType === "outputBased" || rawType === "stateBased" || rawType === "always"
+          ? rawType
+          : "always";
+  const operator = rawOperator === "not_in" ? "notIn" : rawOperator;
+  return {
+    ...condition,
+    type,
+    operator: isEdgeOperator(operator) ? operator : undefined
+  };
+}
+
+function isEdgeOperator(value: unknown): value is NonNullable<EdgeCondition["operator"]> {
+  return value === "==" ||
+    value === "!=" ||
+    value === ">" ||
+    value === "<" ||
+    value === ">=" ||
+    value === "<=" ||
+    value === "in" ||
+    value === "notIn";
 }
 
 function compareValues(left: unknown, operator: NonNullable<EdgeCondition["operator"]>, right: unknown): boolean {
@@ -1490,9 +1825,104 @@ function compareValues(left: unknown, operator: NonNullable<EdgeCondition["opera
       return Number(left) <= Number(right);
     case "in":
       return Array.isArray(right) ? right.includes(left) : String(right).includes(String(left));
-    case "not_in":
+    case "notIn":
       return Array.isArray(right) ? !right.includes(left) : !String(right).includes(String(left));
   }
+}
+
+function validateAndCoerceBySchema(
+  data: Record<string, unknown>,
+  schema: JsonSchema
+): Record<string, unknown> {
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    throw new Error("input must be an object");
+  }
+  const coerced: Record<string, unknown> = { ...data };
+  for (const field of schema.required ?? []) {
+    if (coerced[field] === undefined) {
+      throw new Error(`required field '${field}' is missing`);
+    }
+  }
+  for (const [field, fieldSchema] of Object.entries(schema.properties ?? {})) {
+    if (coerced[field] === undefined) continue;
+    const value = coerceValueToSchemaType(coerced[field], field, schema);
+    if (!schemaValueAccepts(value, fieldSchema)) {
+      throw new Error(`field '${field}' expected ${schemaTypeLabel(fieldSchema)}`);
+    }
+    coerced[field] = value;
+  }
+  return coerced;
+}
+
+function schemaValueAccepts(value: unknown, fieldSchema: JsonSchemaField): boolean {
+  const candidates = Array.isArray(fieldSchema.anyOf) ? fieldSchema.anyOf : [fieldSchema];
+  return candidates.some((candidate) => {
+    const type = candidate.type;
+    if (!type) return true;
+    if (type === "null") return value === null;
+    if (value === null || value === undefined) return false;
+    if (type === "string") return typeof value === "string";
+    if (type === "integer") return typeof value === "number" && Number.isInteger(value);
+    if (type === "number") return typeof value === "number" && Number.isFinite(value);
+    if (type === "boolean") return typeof value === "boolean";
+    if (type === "array") return Array.isArray(value);
+    if (type === "object") return typeof value === "object" && !Array.isArray(value);
+    return true;
+  });
+}
+
+function schemaTypeLabel(fieldSchema: JsonSchemaField): string {
+  if (fieldSchema.type) return fieldSchema.type;
+  if (Array.isArray(fieldSchema.anyOf)) {
+    return fieldSchema.anyOf.map((item) => item.type ?? "unknown").join(" | ");
+  }
+  return "unknown";
+}
+
+function areStepTypesCompatible(fromStep: BaseStep, toStep: BaseStep): boolean {
+  if (fromStep.outputSchema && toStep.inputSchema) {
+    return stableStringify(fromStep.outputSchema) === stableStringify(toStep.inputSchema);
+  }
+  if (fromStep.outputTypeName && toStep.inputTypeName) {
+    return fromStep.outputTypeName === toStep.inputTypeName;
+  }
+  return true;
+}
+
+function stepTypeLabel(step: BaseStep, direction: "input" | "output"): string {
+  const typeName = direction === "input" ? step.inputTypeName : step.outputTypeName;
+  const schema = direction === "input" ? step.inputSchema : step.outputSchema;
+  if (typeName) return typeName;
+  if (schema?.title && typeof schema.title === "string") return schema.title;
+  if (schema) return stableStringify(schema);
+  return "unknown";
+}
+
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
+  if (value && typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b));
+    return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${stableStringify(item)}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function numberOrUndefined(value: unknown): number | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function tryDumpWorkflowComponent(step: BaseStep): ComponentModel | undefined {
+  try {
+    return dumpComponent(step as unknown as { toConfig(): Record<string, unknown> });
+  } catch {
+    return undefined;
+  }
+}
+
+function isComponentModel(value: unknown): value is ComponentModel {
+  return Boolean(value && typeof value === "object" && "provider" in value && "config" in value);
 }
 
 function prepareStepInput(

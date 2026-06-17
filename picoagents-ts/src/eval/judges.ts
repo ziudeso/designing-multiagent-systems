@@ -182,10 +182,10 @@ export class LLMEvalJudge extends BaseEvalJudge {
         reasoning,
         trajectory,
         metadata: {
-          judge_name: this.name,
+          judgeName: this.name,
           model: result.model,
-          criteria_used: evalCriteria,
-          raw_response: result.message.content
+          criteriaUsed: evalCriteria,
+          rawResponse: result.message.content
         }
       });
     } catch (e) {
@@ -201,9 +201,9 @@ export class LLMEvalJudge extends BaseEvalJudge {
         reasoning,
         trajectory,
         metadata: {
-          judge_name: this.name,
+          judgeName: this.name,
           error: e instanceof Error ? e.message : String(e),
-          criteria_used: evalCriteria
+          criteriaUsed: evalCriteria
         }
       });
     }
@@ -435,9 +435,9 @@ export class ExactMatchJudge extends BaseEvalJudge {
       metadata: {
         judge: this.name,
         match: isMatch,
-        case_sensitive: this.caseSensitive,
-        strip_whitespace: this.stripWhitespace,
-        answer_strategy: this.answerStrategy
+        caseSensitive: this.caseSensitive,
+        stripWhitespace: this.stripWhitespace,
+        answerStrategy: this.answerStrategy
       }
     });
   }
@@ -504,8 +504,8 @@ export class FuzzyMatchJudge extends BaseEvalJudge {
         judge: this.name,
         similarity,
         threshold: this.threshold,
-        case_sensitive: this.caseSensitive,
-        answer_strategy: this.answerStrategy
+        caseSensitive: this.caseSensitive,
+        answerStrategy: this.answerStrategy
       }
     });
   }
@@ -562,8 +562,8 @@ export class ContainsJudge extends BaseEvalJudge {
       metadata: {
         judge: this.name,
         contains,
-        case_sensitive: this.caseSensitive,
-        answer_strategy: this.answerStrategy
+        caseSensitive: this.caseSensitive,
+        answerStrategy: this.answerStrategy
       }
     });
   }
@@ -648,7 +648,7 @@ export class CompositeJudge extends BaseEvalJudge {
 
     const metadata = {
       judge: this.name,
-      sub_judges: this.judges.map(([judge, weight], i) => ({
+      subJudges: this.judges.map(([judge, weight], i) => ({
         name: judge.name,
         weight,
         score: scores[i]!.overall

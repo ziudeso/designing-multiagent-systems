@@ -143,6 +143,112 @@ test("AnthropicChatCompletionClient converts messages and parses tool_use blocks
   assert.deepEqual(result.message.toolCalls[0].parameters, { q: "x" });
 });
 
+test("AnthropicChatCompletionClient sends structured output config and parses JSON", async () => {
+  let request;
+  const client = new AnthropicChatCompletionClient({
+    model: "claude-test",
+    apiKey: "key",
+    fetchImpl: async (url, init) => {
+      request = { url, init, body: JSON.parse(init.body) };
+      return jsonResponse({
+        model: "claude-test",
+        stop_reason: "end_turn",
+        content: [{ type: "text", text: "{\"answer\":\"yes\",\"score\":10}" }],
+        usage: { input_tokens: 4, output_tokens: 5 }
+      });
+    }
+  });
+
+  const result = await client.create([new UserMessage({ content: "grade", source: "user" })], {
+    outputFormat: {
+      name: "grade",
+      schema: {
+        type: "object",
+        properties: {
+          answer: { type: "string" },
+          score: { type: "integer" }
+        },
+        required: ["answer", "score"]
+      }
+    }
+  });
+
+  assert.equal(request.body.output_config.format.type, "json_schema");
+  assert.equal(request.body.output_config.format.schema.additionalProperties, false);
+  assert.equal(request.init.headers["anthropic-beta"], undefined);
+  assert.deepEqual(result.structuredOutput, { answer: "yes", score: 10 });
+});
+
+test("AnthropicChatCompletionClient leaves invalid structured JSON unparsed", async () => {
+  const client = new AnthropicChatCompletionClient({
+    model: "claude-test",
+    apiKey: "key",
+    fetchImpl: async () => jsonResponse({
+      model: "claude-test",
+      stop_reason: "end_turn",
+      content: [{ type: "text", text: "{\"answer\":\"yes\",\"score\":\"bad\"}" }],
+      usage: { input_tokens: 4, output_tokens: 5 }
+    })
+  });
+
+  const result = await client.create([new UserMessage({ content: "grade", source: "user" })], {
+    outputFormat: {
+      name: "grade",
+      schema: {
+        type: "object",
+        properties: {
+          answer: { type: "string" },
+          score: { type: "integer" }
+        },
+        required: ["answer", "score"]
+      }
+    }
+  });
+
+  assert.equal(result.structuredOutput, undefined);
+});
+
+test("AnthropicChatCompletionClient omits structured output config for streaming", async () => {
+  let request;
+  const encoder = new TextEncoder();
+  const client = new AnthropicChatCompletionClient({
+    model: "claude-test",
+    apiKey: "key",
+    fetchImpl: async (url, init) => {
+      request = { url, init, body: JSON.parse(init.body) };
+      return new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(encoder.encode('data: {"type":"message_start","message":{"usage":{"input_tokens":1,"output_tokens":0}}}\n\n'));
+            controller.enqueue(encoder.encode('data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"{\\"answer\\":\\"yes\\"}"}}\n\n'));
+            controller.enqueue(encoder.encode('data: {"type":"message_stop"}\n\n'));
+            controller.close();
+          }
+        }),
+        { status: 200, headers: { "content-type": "text/event-stream" } }
+      );
+    }
+  });
+
+  const chunks = [];
+  for await (const chunk of client.createStream([new UserMessage({ content: "grade", source: "user" })], {
+    outputFormat: {
+      name: "grade",
+      schema: {
+        type: "object",
+        properties: { answer: { type: "string" } },
+        required: ["answer"]
+      }
+    }
+  })) {
+    chunks.push(chunk);
+  }
+
+  assert.equal(request.body.stream, true);
+  assert.equal("output_config" in request.body, false);
+  assert.equal(chunks.at(-1).isComplete, true);
+});
+
 test("buildToolCallsFromChunks rebuilds streamed tool calls", () => {
   const calls = buildToolCallsFromChunks(
     new Map([

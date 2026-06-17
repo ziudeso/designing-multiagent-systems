@@ -1,6 +1,8 @@
 import { AgentContext } from "../context.js";
 import { CancellationToken } from "../cancellation.js";
 import { BaseAgent, TaskInput } from "../agents/index.js";
+import { dumpComponent, loadComponent } from "../componentConfig.js";
+import type { ComponentModel } from "../componentConfig.js";
 import { Message, UserMessage } from "../messages.js";
 import { BaseTermination } from "../termination/index.js";
 import {
@@ -63,11 +65,13 @@ export abstract class BaseOrchestrator {
       })) {
         if (isOrchestrationResponse(item)) finalResult = item;
       }
-      return finalResult ?? this.createFallbackResult("No result produced");
+      const response = finalResult ?? this.createFallbackResult("No result produced");
+      await this.persistRun(response, options.persist);
+      return response;
     } catch (error) {
       if (isCancellationError(error)) throw error;
       const elapsedMs = Date.now() - (this.startTime ?? Date.now());
-      return {
+      const response = {
         messages: this.sharedMessages,
         finalResult: `Orchestration failed: ${error instanceof Error ? error.message : String(error)}`,
         usage: new Usage({ durationMs: elapsedMs }),
@@ -77,6 +81,19 @@ export abstract class BaseOrchestrator {
         }),
         patternMetadata: this.getPatternMetadata()
       };
+      await this.persistRun(response, options.persist);
+      return response;
+    }
+  }
+
+  private async persistRun(response: OrchestrationResponse, enabled?: boolean): Promise<void> {
+    if (!enabled) return;
+    try {
+      const { getDefaultStore } = await import("../store/index.js");
+      const store = getDefaultStore();
+      if (store && "saveOrchestratorRun" in store) await store.saveOrchestratorRun(this, response);
+    } catch {
+      // Persistence must never break the run result.
     }
   }
 
@@ -338,6 +355,48 @@ export abstract class BaseOrchestrator {
       patternMetadata: this.getPatternMetadata()
     };
   }
+}
+
+export function serializeBaseOrchestratorConfig(orchestrator: BaseOrchestrator): Record<string, unknown> {
+  return {
+    agents: orchestrator.agents.map((agent) =>
+      dumpComponent(agent as unknown as { toConfig(): Record<string, unknown> })
+    ),
+    termination: dumpComponent(
+      orchestrator.termination as unknown as { toConfig(): Record<string, unknown> }
+    ),
+    maxIterations: orchestrator.maxIterations,
+    name: orchestrator.name,
+    description: orchestrator.description,
+    exampleTasks: [...orchestrator.exampleTasks]
+  };
+}
+
+export function loadBaseOrchestratorOptions(config: Record<string, unknown>): BaseOrchestratorOptions {
+  const agents = Array.isArray(config.agents)
+    ? config.agents.map((agent) => loadComponent(agent as ComponentModel) as unknown as BaseAgent)
+    : [];
+  const termination = loadComponent(config.termination as ComponentModel) as unknown as BaseTermination;
+  return {
+    agents,
+    termination,
+    maxIterations: numberOrUndefined(config.maxIterations ?? config.max_iterations),
+    name: stringOrUndefined(config.name),
+    description: stringOrUndefined(config.description),
+    exampleTasks: Array.isArray(config.exampleTasks ?? config.example_tasks)
+      ? ((config.exampleTasks ?? config.example_tasks) as unknown[]).map(String)
+      : undefined
+  };
+}
+
+function numberOrUndefined(value: unknown): number | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function stringOrUndefined(value: unknown): string | undefined {
+  return value === undefined || value === null ? undefined : String(value);
 }
 
 function isMessage(value: unknown): value is Message {

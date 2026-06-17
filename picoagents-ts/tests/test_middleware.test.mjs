@@ -2,15 +2,21 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
-  AgentContext,
-  BaseMiddleware,
-  ErrorEvent,
-  GuardrailMiddleware,
-  LoggingMiddleware,
-  MetricsMiddleware,
-  MiddlewareChain,
-  MiddlewareContext
-} from "../dist/index.js";
+    AgentContext,
+    AssistantMessage,
+    BaseMiddleware,
+    ErrorEvent,
+    GuardrailMiddleware,
+    LoggingMiddleware,
+    MetricsMiddleware,
+    MiddlewareChain,
+    MiddlewareContext,
+    PIIRedactionMiddleware,
+    ToolCallRequest,
+    ToolResult,
+    Usage,
+    UserMessage
+  } from "../dist/index.js";
 import { collectAsync } from "./helpers.mjs";
 
 class TransformMiddleware extends BaseMiddleware {
@@ -94,6 +100,57 @@ test("GuardrailMiddleware blocks configured tools and patterns", async () => {
       ),
     /blocked pattern/
   );
+});
+
+test("PIIRedactionMiddleware redacts model messages, tool params, and outputs", async () => {
+  const chain = new MiddlewareChain([new PIIRedactionMiddleware()]);
+  let modelInput;
+  const modelItems = await collectAsync(
+    chain.executeStream(
+      "model_call",
+      "agent",
+      new AgentContext(),
+      [new UserMessage({ content: "Email ada@example.com", source: "user" })],
+      async (messages) => {
+        modelInput = messages[0].content;
+        return {
+          message: new AssistantMessage({
+            content: "Use card 4111 1111 1111 1111",
+            source: "llm"
+          }),
+          usage: new Usage(),
+          model: "test",
+          finishReason: "stop"
+        };
+      }
+    )
+  );
+
+  const modelResult = modelItems.at(-1);
+  assert.equal(modelInput, "Email [EMAIL-REDACTED]");
+  assert.equal(modelResult.message.content, "Use card [CC-REDACTED]");
+
+  let toolParams;
+  const toolItems = await collectAsync(
+    chain.executeStream(
+      "tool_call",
+      "agent",
+      new AgentContext(),
+      new ToolCallRequest({
+        toolName: "lookup",
+        parameters: { query: "Call 555-123-4567" },
+        callId: "call_1"
+      }),
+      async (toolCall) => {
+        toolParams = toolCall.parameters;
+        return new ToolResult({ success: true, result: "SSN 123-45-6789" });
+      }
+    )
+  );
+
+  const toolResult = toolItems.at(-1);
+  assert.equal(toolParams.query, "Call [PHONE-REDACTED]");
+  assert.equal(toolResult.result, "SSN [SSN-REDACTED]");
 });
 
 test("MetricsMiddleware counts operations and errors", async () => {

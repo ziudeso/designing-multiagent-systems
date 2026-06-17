@@ -10,6 +10,16 @@
  */
 
 import { AgentContext } from "./context.js";
+import {
+  AssistantMessage,
+  Message,
+  MultiModalMessage,
+  SystemMessage,
+  ToolCallRequest,
+  ToolMessage,
+  UserMessage
+} from "./messages.js";
+import { ToolResult } from "./tools/base.js";
 import { BaseEvent, ToolApprovalEvent } from "./types.js";
 import type { AgentEvent } from "./types.js";
 
@@ -242,6 +252,74 @@ export class RateLimitMiddleware extends BaseMiddleware {
   }
 }
 
+/** Redacts personally identifiable information from model and tool inputs/outputs. */
+export class PIIRedactionMiddleware extends BaseMiddleware {
+  private patterns: Array<[RegExp, string]>;
+
+  constructor(patterns?: Record<string, string>) {
+    super();
+    this.patterns = Object.entries(patterns ?? DEFAULT_PII_PATTERNS).map(([pattern, replacement]) => [
+      new RegExp(pattern, "g"),
+      replacement
+    ]);
+  }
+
+  private redactText(text: string): string {
+    return this.patterns.reduce((current, [pattern, replacement]) => current.replace(pattern, replacement), text);
+  }
+
+  async *processRequest(context: MiddlewareContext): AsyncGenerator<RequestYield> {
+    if (context.operation === "model_call" && Array.isArray(context.data)) {
+      context.data = (context.data as Message[]).map((message) => {
+        const redacted = this.redactText(message.content);
+        return redacted === message.content ? message : cloneMessageWithContent(message, redacted);
+      });
+    } else if (context.operation === "tool_call") {
+      const data = context.data as { parameters?: unknown } | undefined;
+      if (data && data.parameters && typeof data.parameters === "object" && !Array.isArray(data.parameters)) {
+        const parameters = { ...(data.parameters as Record<string, unknown>) };
+        let changed = false;
+        for (const [key, value] of Object.entries(parameters)) {
+          if (typeof value === "string") {
+            const redacted = this.redactText(value);
+            if (redacted !== value) {
+              parameters[key] = redacted;
+              changed = true;
+            }
+          }
+        }
+        if (changed) context.data = cloneToolCallWithParameters(context.data, parameters);
+      }
+    }
+    yield context;
+  }
+
+  async *processResponse(context: MiddlewareContext, result: unknown): AsyncGenerator<ResponseYield> {
+    if (context.operation === "model_call" && hasMessage(result)) {
+      const redacted = this.redactText(result.message.content);
+      if (redacted !== result.message.content) {
+        yield {
+          ...result,
+          message: cloneMessageWithContent(result.message, redacted)
+        };
+        return;
+      }
+    } else if (context.operation === "tool_call" && result instanceof ToolResult && typeof result.result === "string") {
+      const redacted = this.redactText(result.result);
+      if (redacted !== result.result) {
+        yield new ToolResult({
+          success: result.success,
+          result: redacted,
+          error: result.error,
+          metadata: result.metadata
+        });
+        return;
+      }
+    }
+    yield result;
+  }
+}
+
 /** Enforces safety guardrails: blocks tools by name and content by pattern. */
 export class GuardrailMiddleware extends BaseMiddleware {
   private blockedTools: string[];
@@ -278,6 +356,69 @@ export class GuardrailMiddleware extends BaseMiddleware {
     }
     yield context;
   }
+}
+
+const DEFAULT_PII_PATTERNS: Record<string, string> = {
+  "\\b\\d{3}-\\d{2}-\\d{4}\\b": "[SSN-REDACTED]",
+  "\\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}\\b": "[EMAIL-REDACTED]",
+  "\\b\\d{3}[-.]?\\d{3}[-.]?\\d{4}\\b": "[PHONE-REDACTED]",
+  "\\b\\d{4}[\\s-]?\\d{4}[\\s-]?\\d{4}[\\s-]?\\d{4}\\b": "[CC-REDACTED]"
+};
+
+function cloneMessageWithContent(message: Message, content: string): Message {
+  const base = { content, source: message.source, timestamp: message.timestamp };
+  if (message instanceof SystemMessage) return new SystemMessage(base);
+  if (message instanceof UserMessage) return new UserMessage({ ...base, name: message.name });
+  if (message instanceof AssistantMessage) {
+    return new AssistantMessage({
+      ...base,
+      toolCalls: message.toolCalls,
+      structuredContent: message.structuredContent,
+      usage: message.usage
+    });
+  }
+  if (message instanceof ToolMessage) {
+    return new ToolMessage({
+      ...base,
+      toolCallId: message.toolCallId,
+      toolName: message.toolName,
+      success: message.success,
+      error: message.error,
+      metadata: message.metadata
+    });
+  }
+  if (message instanceof MultiModalMessage) {
+    return new MultiModalMessage({
+      ...base,
+      role: message.role,
+      mimeType: message.mimeType,
+      data: message.data,
+      mediaUrl: message.mediaUrl,
+      metadata: message.metadata
+    });
+  }
+  return message;
+}
+
+function cloneToolCallWithParameters(value: unknown, parameters: Record<string, unknown>): unknown {
+  if (value instanceof ToolCallRequest) {
+    return new ToolCallRequest({
+      toolName: value.toolName,
+      callId: value.callId,
+      parameters
+    });
+  }
+  if (value && typeof value === "object") return { ...value, parameters };
+  return value;
+}
+
+function hasMessage(value: unknown): value is { message: AssistantMessage } {
+  return Boolean(
+    value &&
+      typeof value === "object" &&
+      "message" in value &&
+      (value as { message?: unknown }).message instanceof AssistantMessage
+  );
 }
 
 /** Collects basic metrics about agent operations. */

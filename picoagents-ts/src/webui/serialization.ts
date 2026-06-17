@@ -25,7 +25,6 @@ export function serializeEvent(event: unknown): unknown {
       usage: serializeUsage(event.usage),
       source: event.source,
       finishReason: event.finishReason,
-      finish_reason: event.finishReason,
       timestamp: event.timestamp.toISOString()
     };
   }
@@ -34,7 +33,7 @@ export function serializeEvent(event: unknown): unknown {
 
 export function wrapStreamEvent(sessionId: string, event: unknown): WebUIStreamEvent {
   return {
-    session_id: sessionId,
+    sessionId,
     timestamp: new Date().toISOString(),
     event: serializeEvent(event)
   };
@@ -48,19 +47,19 @@ export function serializeContext(context: AgentContext): Record<string, unknown>
   return {
     messages: context.messages.map(serializeValue),
     metadata: serializeValue(context.metadata),
-    shared_state: serializeValue(context.sharedState),
+    sharedState: serializeValue(context.sharedState),
     environment: serializeValue(context.environment),
-    session_id: context.sessionId,
-    created_at: context.createdAt.toISOString(),
-    pending_approval_requests: context.pendingApprovalRequests.map(serializeValue),
-    approval_responses: serializeValue(context.approvalResponses),
-    pending_tool_calls: serializeValue(context.pendingToolCalls)
+    sessionId: context.sessionId,
+    createdAt: context.createdAt.toISOString(),
+    pendingApprovalRequests: context.pendingApprovalRequests.map(serializeValue),
+    approvalResponses: serializeValue(context.approvalResponses),
+    pendingToolCalls: serializeValue(context.pendingToolCalls)
   };
 }
 
 export function deserializeContext(value: any): AgentContext {
   const approvalResponses: Record<string, ToolApprovalResponse> = {};
-  for (const [key, response] of Object.entries(value.approvalResponses ?? {})) {
+  for (const [key, response] of Object.entries(value.approvalResponses ?? value.approval_responses ?? {})) {
     approvalResponses[key] = new ToolApprovalResponse({
       requestId: (response as any).requestId ?? (response as any).request_id,
       toolCallId: (response as any).toolCallId ?? (response as any).tool_call_id,
@@ -97,18 +96,11 @@ export function serializeValue(value: unknown): unknown {
 function serializeUsage(usage: Usage): Record<string, unknown> {
   return {
     durationMs: usage.durationMs,
-    duration_ms: usage.durationMs,
     llmCalls: usage.llmCalls,
-    llm_calls: usage.llmCalls,
     tokensInput: usage.tokensInput,
-    tokens_input: usage.tokensInput,
     tokensOutput: usage.tokensOutput,
-    tokens_output: usage.tokensOutput,
     toolCalls: usage.toolCalls,
-    tool_calls: usage.toolCalls,
     memoryOperations: usage.memoryOperations,
-    memory_operations: usage.memoryOperations,
-    costEstimate: usage.costEstimate,
-    cost_estimate: usage.costEstimate
+    costEstimate: usage.costEstimate
   };
 }

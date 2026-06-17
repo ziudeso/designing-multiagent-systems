@@ -1,11 +1,18 @@
 import { BaseAgent } from "../agents/index.js";
+import { dumpComponent, loadComponent, registerComponent } from "../componentConfig.js";
+import type { ComponentModel, ComponentType } from "../componentConfig.js";
 import { BaseChatCompletionClient, StructuredOutputFormat } from "../llm/index.js";
 import { Message, UserMessage } from "../messages.js";
-import { BaseOrchestrator, BaseOrchestratorOptions } from "./base.js";
+import {
+  BaseOrchestrator,
+  BaseOrchestratorOptions,
+  loadBaseOrchestratorOptions,
+  serializeBaseOrchestratorConfig
+} from "./base.js";
 import { AgentResponse } from "../types.js";
 
 export interface AgentSelection {
-  selected_agent: string;
+  selectedAgent: string;
   reasoning: string;
   confidence: number;
 }
@@ -19,15 +26,19 @@ const agentSelectionFormat: StructuredOutputFormat = {
   schema: {
     type: "object",
     properties: {
-      selected_agent: { type: "string", description: "Name of the selected agent" },
+      selectedAgent: { type: "string", description: "Name of the selected agent" },
       reasoning: { type: "string", description: "Explanation for the selected agent" },
       confidence: { type: "number", description: "Confidence from 0.0 to 1.0" }
     },
-    required: ["selected_agent", "reasoning", "confidence"]
+    required: ["selectedAgent", "reasoning", "confidence"]
   }
 };
 
 export class AIOrchestrator extends BaseOrchestrator {
+  static componentType: ComponentType = "orchestrator";
+  static componentProvider = "picoagents.orchestration.AIOrchestrator";
+  static componentVersion = 1;
+
   modelClient: BaseChatCompletionClient;
   selectionHistory: Array<{
     selectedAgent: string;
@@ -41,6 +52,20 @@ export class AIOrchestrator extends BaseOrchestrator {
   constructor(options: AIOrchestratorOptions) {
     super(options);
     this.modelClient = options.modelClient;
+  }
+
+  static fromConfig(config: Record<string, unknown> = {}): AIOrchestrator {
+    return new AIOrchestrator({
+      ...loadBaseOrchestratorOptions(config),
+      modelClient: loadComponent((config.modelClient ?? config.model_client) as ComponentModel) as unknown as BaseChatCompletionClient
+    });
+  }
+
+  toConfig(): Record<string, unknown> {
+    return {
+      ...serializeBaseOrchestratorConfig(this),
+      modelClient: dumpComponent(this.modelClient as unknown as { toConfig(): Record<string, unknown> })
+    };
   }
 
   async selectNextAgent(): Promise<BaseAgent> {
@@ -67,9 +92,10 @@ Select the most appropriate agent and explain your reasoning in one clean line.`
         [new UserMessage({ content: prompt, source: "orchestrator" })],
         { outputFormat: agentSelectionFormat }
       );
-      const selection = result.structuredOutput as Partial<AgentSelection> | undefined;
-      if (selection?.selected_agent) {
-        selectedName = selection.selected_agent;
+      const selection = result.structuredOutput as (Partial<AgentSelection> & { selected_agent?: string }) | undefined;
+      const selectedFromStructured = selection?.selectedAgent ?? selection?.selected_agent;
+      if (selection && selectedFromStructured) {
+        selectedName = selectedFromStructured;
         reasoning = selection.reasoning ?? "Structured selection";
         confidence = typeof selection.confidence === "number" ? selection.confidence : 0.5;
       } else {
@@ -165,3 +191,5 @@ Select the most appropriate agent and explain your reasoning in one clean line.`
     return this.agents[0]!.name;
   }
 }
+
+registerComponent(AIOrchestrator as any);

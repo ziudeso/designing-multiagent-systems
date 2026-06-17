@@ -3,9 +3,12 @@ import { test } from "node:test";
 
 import {
   Agent,
+  AgentContext,
   BaseEndHook,
+  BaseStartHook,
   CompletionCheckHook,
   LLMCompletionCheckHook,
+  LoopContext,
   MaxRestartsTermination,
   PlanningHook,
   UserMessage,
@@ -39,6 +42,40 @@ test("PlanningHook injects a user message before the first model call", async ()
   assert.ok(firstCall.some((msg) => msg instanceof UserMessage && msg.source === "hook" && msg.content === "make a plan"));
 });
 
+test("Start hooks run in order and skip null injections", async () => {
+  class NullStartHook extends BaseStartHook {
+    async onStart() {
+      return null;
+    }
+  }
+
+  class InjectStartHook extends BaseStartHook {
+    constructor(content) {
+      super();
+      this.content = content;
+    }
+
+    async onStart(context) {
+      context.metadata.seen = [...(context.metadata.seen ?? []), this.content];
+      return this.content;
+    }
+  }
+
+  const client = createMockClient({ responses: ["ok"] });
+  const agent = new Agent({
+    name: "agent",
+    instructions: "Reply.",
+    modelClient: client,
+    startHooks: [new NullStartHook(), new InjectStartHook("HOOK_A"), new InjectStartHook("HOOK_B")]
+  });
+
+  await agent.run("task");
+  const hookMessages = client.receivedMessages[0].filter(
+    (msg) => msg instanceof UserMessage && msg.source === "hook"
+  );
+  assert.deepEqual(hookMessages.map((msg) => msg.content), ["HOOK_A", "HOOK_B"]);
+});
+
 test("End hooks can resume the agent loop once", async () => {
   const hook = new ContinueOnceHook();
   const client = createMockClient({ responses: ["first", "second"] });
@@ -54,6 +91,42 @@ test("End hooks can resume the agent loop once", async () => {
   assert.equal(response.messages.at(-1).content, "second");
   assert.equal(client.callCount, 2);
   assert.equal(hook.called, 2);
+});
+
+test("First end hook that injects a message wins", async () => {
+  const calls = [];
+
+  class HookA extends BaseEndHook {
+    async onEnd() {
+      calls.push("A");
+      return "resume from A";
+    }
+  }
+
+  class HookB extends BaseEndHook {
+    async onEnd() {
+      calls.push("B");
+      return "resume from B";
+    }
+  }
+
+  const client = createMockClient({ responses: ["first", "second"] });
+  const agent = new Agent({
+    name: "agent",
+    instructions: "Reply.",
+    modelClient: client,
+    endHooks: [new HookA(), new HookB()],
+    maxIterations: 2
+  });
+
+  await agent.run("task");
+  assert.deepEqual(calls, ["A", "A"]);
+  assert.equal(client.callCount, 2);
+  assert.ok(
+    client.receivedMessages[1].some(
+      (msg) => msg instanceof UserMessage && msg.source === "hook" && msg.content === "resume from A"
+    )
+  );
 });
 
 test("CompletionCheckHook requests continuation for incomplete todos", async () => {
@@ -76,6 +149,47 @@ test("CompletionCheckHook requests continuation for incomplete todos", async () 
       metadata: {}
     });
     assert.match(message, /incomplete tasks/);
+  } finally {
+    setTodoPath(null);
+    setSessionId(null);
+  }
+});
+
+test("LoopContext constructor supplies Python-style defaults", () => {
+  const context = new LoopContext({
+    agentContext: new AgentContext(),
+    llmMessages: [],
+    agentName: "agent"
+  });
+
+  assert.equal(context.iteration, 0);
+  assert.equal(context.restartCount, 0);
+  assert.deepEqual(context.metadata, {});
+});
+
+test("CompletionCheckHook with zero restarts never resumes", async () => {
+  const dir = await makeTempDir();
+  setTodoPath(path.join(dir, "todos.json"));
+  setSessionId("hooks-zero");
+  try {
+    await new TodoWriteTool().execute({
+      todos: [
+        { content: "Still pending", status: "pending", activeForm: "Doing pending work" }
+      ]
+    });
+
+    const client = createMockClient({ responses: ["done", "should not run"] });
+    const agent = new Agent({
+      name: "agent",
+      instructions: "Reply.",
+      modelClient: client,
+      endHooks: [new CompletionCheckHook({ maxRestarts: 0 })],
+      maxIterations: 3
+    });
+
+    const response = await agent.run("task");
+    assert.equal(client.callCount, 1);
+    assert.equal(response.messages.at(-1).content, "done");
   } finally {
     setTodoPath(null);
     setSessionId(null);

@@ -45,9 +45,9 @@ export class EntityRegistry {
     const info = object
       ? createEntityInfoFromObject(entityId, object, {
           source: "github",
-          module_path: filePath
+          modulePath: filePath
         })
-      : { ...entity, id: entityId, source: "github", module_path: filePath };
+      : { ...entity, id: entityId, source: "github", modulePath: filePath };
     if (info) this.entities.set(entityId, info);
     return info;
   }

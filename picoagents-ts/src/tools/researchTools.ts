@@ -21,6 +21,14 @@ export interface WebFetchToolOptions extends DomainFilterOptions {
   fetchImpl?: typeof fetch;
 }
 
+export interface ArxivSearchToolOptions {
+  fetchImpl?: typeof fetch;
+}
+
+export interface YouTubeCaptionToolOptions {
+  fetchImpl?: typeof fetch;
+}
+
 export class WebSearchTool extends BaseTool {
   static componentType: ComponentType = "tool";
   static componentProvider = "picoagents.tools.WebSearchTool";
@@ -366,36 +374,303 @@ export class ExtractTextTool extends BaseTool {
     return {};
   }
 
+    get parameters(): JSONSchema {
+      return {
+        type: "object",
+        properties: {
+          html: { type: "string", description: "HTML content to extract text from" },
+          selector: {
+            type: "string",
+            description: "Optional simple CSS selector (tag, #id, .class, tag.class, or tag#id)"
+          }
+        },
+        required: ["html"]
+      };
+    }
+
+    async execute(parameters: Record<string, unknown>): Promise<ToolResult> {
+      const html = String(parameters.html ?? "");
+      const selector = parameters.selector === undefined ? undefined : String(parameters.selector);
+      let selectedHtml = html;
+      if (selector) {
+        try {
+          selectedHtml = selectHtml(html, selector);
+        } catch (error) {
+          return new ToolResult({
+            success: false,
+            result: null,
+            error: `CSS selector extraction failed: ${error instanceof Error ? error.message : String(error)}`,
+            metadata: { selector }
+          });
+        }
+        if (!selectedHtml) {
+          return new ToolResult({
+            success: true,
+            result: "",
+            metadata: { length: 0, selector, matches: 0 }
+          });
+        }
+      }
+      const text = extractTextFromHtml(selectedHtml);
+      return new ToolResult({
+        success: true,
+        result: text,
+        metadata: { length: text.length, ...(selector ? { selector } : {}) }
+      });
+    }
+  }
+
+function selectHtml(html: string, selector: string): string {
+  const parsed = parseSimpleSelector(selector);
+  const matches: string[] = [];
+  const elementPattern = /<([A-Za-z][\w:-]*)(\s[^>]*)?>/gi;
+  for (const match of html.matchAll(elementPattern)) {
+    const tag = match[1] ?? "";
+    const attrs = parseHtmlAttributes(match[2] ?? "");
+    if (matchesSimpleSelector(tag, attrs, parsed)) {
+      matches.push(extractElementHtml(html, tag, match.index ?? 0, (match.index ?? 0) + match[0].length));
+    }
+  }
+  return matches.join("\n");
+}
+
+function extractElementHtml(html: string, tagName: string, startIndex: number, contentStart: number): string {
+  const escaped = escapeRegExp(tagName);
+  const tagPattern = new RegExp(`<\\/?${escaped}(?:\\s[^>]*)?>`, "gi");
+  tagPattern.lastIndex = contentStart;
+  let depth = 1;
+  for (;;) {
+    const match = tagPattern.exec(html);
+    if (!match) return html.slice(startIndex);
+    if (match[0].startsWith("</")) {
+      depth -= 1;
+    } else {
+      depth += 1;
+    }
+    if (depth === 0) {
+      return html.slice(startIndex, tagPattern.lastIndex);
+    }
+  }
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+interface SimpleSelector {
+  tag?: string;
+  id?: string;
+  className?: string;
+}
+
+function parseSimpleSelector(selector: string): SimpleSelector {
+  const trimmed = selector.trim();
+  if (!trimmed) throw new Error("selector cannot be empty");
+  if (/[\s>+~,[\]]/.test(trimmed)) {
+    throw new Error("only single tag, id, and class selectors are supported");
+  }
+
+  const match = trimmed.match(/^([A-Za-z][\w:-]*)?(?:#([\w:-]+)|\.([\w:-]+))?$/);
+  if (!match || (!match[1] && !match[2] && !match[3])) {
+    throw new Error("unsupported selector");
+  }
+  return {
+    tag: match[1]?.toLowerCase(),
+    id: match[2],
+    className: match[3]
+  };
+}
+
+function parseHtmlAttributes(attrs: string): Record<string, string> {
+  const result: Record<string, string> = {};
+  const attrPattern = /([A-Za-z_:][\w:.-]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/g;
+  for (const match of attrs.matchAll(attrPattern)) {
+    result[(match[1] ?? "").toLowerCase()] = match[2] ?? match[3] ?? match[4] ?? "";
+  }
+  return result;
+}
+
+function matchesSimpleSelector(tag: string, attrs: Record<string, string>, selector: SimpleSelector): boolean {
+  if (selector.tag && tag.toLowerCase() !== selector.tag) return false;
+  if (selector.id && attrs.id !== selector.id) return false;
+  if (selector.className) {
+    const classes = (attrs.class ?? "").split(/\s+/).filter(Boolean);
+    if (!classes.includes(selector.className)) return false;
+  }
+  return true;
+}
+
+export class ArxivSearchTool extends BaseTool {
+  static componentType: ComponentType = "tool";
+  static componentProvider = "picoagents.tools.ArxivSearchTool";
+  static componentVersion = 1;
+
+  private fetchImpl: typeof fetch;
+
+  constructor(options: ArxivSearchToolOptions = {}) {
+    super({
+      name: "arxiv_search",
+      description: "Search arXiv for academic papers. Returns titles, authors, abstracts, and PDF URLs."
+    });
+    this.fetchImpl = options.fetchImpl ?? fetch;
+  }
+
+  static fromConfig(_config: Record<string, unknown>): ArxivSearchTool {
+    return new ArxivSearchTool();
+  }
+
+  toConfig(): Record<string, unknown> {
+    return {};
+  }
+
   get parameters(): JSONSchema {
     return {
       type: "object",
       properties: {
-        html: { type: "string", description: "HTML content to extract text from" },
-        selector: {
+        query: {
           type: "string",
-          description: "CSS selector support is not available in the dependency-free TS implementation"
+          description: "Search query. arXiv query syntax is supported."
+        },
+        max_results: {
+          type: "integer",
+          description: "Maximum number of results to return (default: 5, max: 20)"
+        },
+        sort_by: {
+          type: "string",
+          enum: ["relevance", "lastUpdatedDate", "submittedDate"],
+          description: "Sort order for results (default: relevance)"
         }
       },
-      required: ["html"]
+      required: ["query"]
     };
   }
 
   async execute(parameters: Record<string, unknown>): Promise<ToolResult> {
-    const html = String(parameters.html ?? "");
-    if (parameters.selector) {
+    const query = String(parameters.query ?? "");
+    const maxResults = clampInteger(parameters.max_results, 1, 20, 5);
+    const sortBy = String(parameters.sort_by ?? "relevance");
+
+    try {
+      const url = new URL("https://export.arxiv.org/api/query");
+      url.searchParams.set("search_query", query);
+      url.searchParams.set("start", "0");
+      url.searchParams.set("max_results", String(maxResults));
+      url.searchParams.set("sortBy", ["relevance", "lastUpdatedDate", "submittedDate"].includes(sortBy) ? sortBy : "relevance");
+
+      const response = await this.fetchImpl(url);
+      if (!response.ok) throw new Error(`HTTP ${response.status}: ${(await response.text()).slice(0, 200)}`);
+      const xml = await response.text();
+      const results = parseArxivEntries(xml);
+
+      return new ToolResult({
+        success: true,
+        result: results,
+        metadata: { query, count: results.length }
+      });
+    } catch (error) {
       return new ToolResult({
         success: false,
         result: null,
-        error: "CSS selector extraction is not available in the dependency-free TypeScript implementation.",
-        metadata: { selector: parameters.selector }
+        error: `arXiv search failed: ${error instanceof Error ? error.message : String(error)}`,
+        metadata: { query }
       });
     }
-    const text = extractTextFromHtml(html);
-    return new ToolResult({
-      success: true,
-      result: text,
-      metadata: { length: text.length }
+  }
+}
+
+export class YouTubeCaptionTool extends BaseTool {
+  static componentType: ComponentType = "tool";
+  static componentProvider = "picoagents.tools.YouTubeCaptionTool";
+  static componentVersion = 1;
+
+  private fetchImpl: typeof fetch;
+
+  constructor(options: YouTubeCaptionToolOptions = {}) {
+    super({
+      name: "youtube_caption",
+      description:
+        "Extract captions/transcripts from YouTube videos when public timed-text captions are available. " +
+        "Supports standard YouTube URLs, youtu.be short links, and direct video IDs."
     });
+    this.fetchImpl = options.fetchImpl ?? fetch;
+  }
+
+  static fromConfig(_config: Record<string, unknown>): YouTubeCaptionTool {
+    return new YouTubeCaptionTool();
+  }
+
+  toConfig(): Record<string, unknown> {
+    return {};
+  }
+
+  get parameters(): JSONSchema {
+    return {
+      type: "object",
+      properties: {
+        url: {
+          type: "string",
+          description: "YouTube video URL, such as https://www.youtube.com/watch?v=VIDEO_ID or https://youtu.be/VIDEO_ID"
+        },
+        video_id: {
+          type: "string",
+          description: "YouTube video ID. Used when url is not provided."
+        },
+        language: {
+          type: "string",
+          description: "Preferred caption language code. Defaults to en."
+        }
+      }
+    };
+  }
+
+  async execute(parameters: Record<string, unknown>): Promise<ToolResult> {
+    const rawUrl = parameters.url === undefined ? "" : String(parameters.url);
+    const videoId = String(parameters.video_id ?? "") || extractYouTubeVideoId(rawUrl);
+    const language = String(parameters.language ?? "en");
+
+    if (!videoId) {
+      return new ToolResult({
+        success: false,
+        result: null,
+        error: rawUrl ? `Could not extract video ID from URL: ${rawUrl}` : "Provide either url or video_id.",
+        metadata: { url: rawUrl }
+      });
+    }
+
+    try {
+      const first = await fetchYouTubeTimedText(this.fetchImpl, videoId, language);
+      const xml = first || (language === "en" ? "" : await fetchYouTubeTimedText(this.fetchImpl, videoId, "en"));
+      const segments = parseYouTubeCaptionSegments(xml);
+      if (!segments.length) {
+        return new ToolResult({
+          success: false,
+          result: null,
+          error:
+            "No public captions were returned for this video. Captions may be disabled, private, region-restricted, or blocked by YouTube.",
+          metadata: { video_id: videoId, url: rawUrl, language }
+        });
+      }
+
+      const transcript = segments.join(" ").replace(/\s+/g, " ").trim();
+      return new ToolResult({
+        success: true,
+        result: transcript,
+        metadata: {
+          video_id: videoId,
+          url: rawUrl,
+          language,
+          length: transcript.length,
+          segment_count: segments.length
+        }
+      });
+    } catch (error) {
+      return new ToolResult({
+        success: false,
+        result: null,
+        error: `Failed to extract captions: ${error instanceof Error ? error.message : String(error)}`,
+        metadata: { video_id: videoId, url: rawUrl }
+      });
+    }
   }
 }
 
@@ -411,7 +686,7 @@ export function createResearchTools(options: {
   if (options.tavilyApiKey ?? process.env.TAVILY_API_KEY) {
     tools.push(new WebSearchTool({ apiKey: options.tavilyApiKey }));
   }
-  tools.push(new WebFetchTool(), new ExtractTextTool());
+  tools.push(new WebFetchTool(), new ExtractTextTool(), new ArxivSearchTool(), new YouTubeCaptionTool());
   return tools;
 }
 
@@ -419,6 +694,8 @@ registerComponent(WebSearchTool as any);
 registerComponent(GoogleSearchTool as any);
 registerComponent(WebFetchTool as any);
 registerComponent(ExtractTextTool as any);
+registerComponent(ArxivSearchTool as any);
+registerComponent(YouTubeCaptionTool as any);
 
 function clampInteger(value: unknown, min: number, max: number, fallback: number): number {
   const parsed = Number(value);
@@ -476,4 +753,69 @@ function decodeHtmlEntities(value: string): string {
     .replace(/&gt;/g, ">")
     .replace(/&quot;/g, "\"")
     .replace(/&#39;/g, "'");
+}
+
+function parseArxivEntries(xml: string): Array<Record<string, unknown>> {
+  const entries = [...xml.matchAll(/<entry\b[^>]*>([\s\S]*?)<\/entry>/g)];
+  return entries.map((match) => {
+    const entry = match[1] ?? "";
+    const id = xmlText(entry, "id");
+    const pdfUrl =
+      matchAttribute(entry, /<link\b(?=[^>]*\btitle=["']pdf["'])(?=[^>]*\bhref=["']([^"']+)["'])[^>]*>/i) ??
+      id.replace("/abs/", "/pdf/");
+    return {
+      title: xmlText(entry, "title"),
+      authors: [...entry.matchAll(/<author\b[^>]*>([\s\S]*?)<\/author>/g)].map((author) =>
+        xmlText(author[1] ?? "", "name")
+      ),
+      abstract: xmlText(entry, "summary"),
+      pdf_url: pdfUrl,
+      published: xmlText(entry, "published"),
+      arxiv_id: id.split("/").pop() ?? id
+    };
+  });
+}
+
+function xmlText(xml: string, tag: string): string {
+  const match = new RegExp(`<${tag}\\b[^>]*>([\\s\\S]*?)<\\/${tag}>`, "i").exec(xml);
+  if (!match) return "";
+  return decodeHtmlEntities(match[1]!.replace(/\s+/g, " ").trim());
+}
+
+function matchAttribute(text: string, pattern: RegExp): string | undefined {
+  const match = pattern.exec(text);
+  return match?.[1] ? decodeHtmlEntities(match[1]) : undefined;
+}
+
+function extractYouTubeVideoId(value: string): string {
+  if (/^[a-zA-Z0-9_-]{11}$/.test(value)) return value;
+  try {
+    const parsed = new URL(value);
+    if (parsed.hostname === "youtu.be") return parsed.pathname.replace(/^\/+/, "").slice(0, 11);
+    if (["www.youtube.com", "youtube.com", "m.youtube.com"].includes(parsed.hostname)) {
+      if (parsed.pathname === "/watch") return parsed.searchParams.get("v") ?? "";
+      if (parsed.pathname.startsWith("/embed/") || parsed.pathname.startsWith("/v/")) {
+        return parsed.pathname.split("/")[2] ?? "";
+      }
+    }
+  } catch {
+    return "";
+  }
+  return "";
+}
+
+async function fetchYouTubeTimedText(fetchImpl: typeof fetch, videoId: string, language: string): Promise<string> {
+  const url = new URL("https://video.google.com/timedtext");
+  url.searchParams.set("v", videoId);
+  url.searchParams.set("lang", language);
+  const response = await fetchImpl(url);
+  if (!response.ok) throw new Error(`HTTP ${response.status}: ${(await response.text()).slice(0, 200)}`);
+  return response.text();
+}
+
+function parseYouTubeCaptionSegments(xml: string): string[] {
+  if (!xml.trim()) return [];
+  return [...xml.matchAll(/<text\b[^>]*>([\s\S]*?)<\/text>/g)]
+    .map((match) => decodeHtmlEntities(match[1] ?? "").replace(/\s+/g, " ").trim())
+    .filter(Boolean);
 }

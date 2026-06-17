@@ -89,33 +89,55 @@ export class TaskResult {
   /** Serialize the result to a plain object (includes full message trace). */
   toDict(): Record<string, unknown> {
     return {
-      task_id: this.taskId,
-      target_name: this.targetName,
+      taskId: this.taskId,
+      targetName: this.targetName,
       score: {
         overall: this.score.overall,
         dimensions: this.score.dimensions,
         reasoning: this.score.reasoning,
         metadata: this.score.metadata ?? {}
       },
-      total_tokens: this.totalTokens,
-      input_tokens: this.inputTokens,
-      output_tokens: this.outputTokens,
+      totalTokens: this.totalTokens,
+      inputTokens: this.inputTokens,
+      outputTokens: this.outputTokens,
       iterations: this.iterations,
-      duration_ms: this.durationMs,
-      files_read: this.filesRead,
-      unique_files: this.uniqueFiles,
-      duplicate_reads: this.duplicateReads,
-      compaction_events: this.compactionEvents,
-      tokens_saved: this.tokensSaved,
+      durationMs: this.durationMs,
+      filesRead: this.filesRead,
+      uniqueFiles: this.uniqueFiles,
+      duplicateReads: this.duplicateReads,
+      compactionEvents: this.compactionEvents,
+      tokensSaved: this.tokensSaved,
       metrics: this.metrics,
       success: this.trajectory.success,
       error: this.trajectory.error ?? null,
       trace: {
         messages: serializeMessages(this.trajectory.messages),
         events: (this.trajectory.metadata.events as unknown[]) ?? [],
-        event_count: (this.trajectory.metadata.event_count as number) ?? 0
+        eventCount: (this.trajectory.metadata.eventCount as number) ??
+          (this.trajectory.metadata.event_count as number) ??
+          0
       }
     };
+  }
+
+  /** Save the full trace for this task result to a standalone JSON file. */
+  async saveTrace(filePath: string): Promise<string> {
+    const traceData = {
+      taskId: this.taskId,
+      targetName: this.targetName,
+      score: this.score.overall,
+      success: this.trajectory.success,
+      error: this.trajectory.error ?? null,
+      iterations: this.iterations,
+      totalTokens: this.totalTokens,
+      durationMs: this.durationMs,
+      messages: serializeMessages(this.trajectory.messages),
+      events: (this.trajectory.metadata.events as unknown[]) ?? [],
+      metrics: this.metrics
+    };
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    await fs.writeFile(filePath, JSON.stringify(traceData, null, 2));
+    return filePath;
   }
 
   toString(): string {
@@ -156,24 +178,24 @@ export class TargetSummary {
 
   toDict(): Record<string, unknown> {
     return {
-      target_name: this.targetName,
-      task_count: this.taskCount,
-      avg_score: this.avgScore,
-      min_score: this.minScore,
-      max_score: this.maxScore,
-      total_tokens: this.totalTokens,
-      avg_tokens_per_task: this.avgTokensPerTask,
-      total_iterations: this.totalIterations,
-      avg_iterations_per_task: this.avgIterationsPerTask,
-      total_duration_ms: this.totalDurationMs,
-      avg_duration_per_task_ms: this.avgDurationPerTaskMs,
-      total_unique_files: this.totalUniqueFiles,
-      total_duplicate_reads: this.totalDuplicateReads,
-      duplicate_read_ratio: this.duplicateReadRatio,
-      total_compaction_events: this.totalCompactionEvents,
-      total_tokens_saved: this.totalTokensSaved,
-      success_count: this.successCount,
-      success_rate: this.successRate
+      targetName: this.targetName,
+      taskCount: this.taskCount,
+      avgScore: this.avgScore,
+      minScore: this.minScore,
+      maxScore: this.maxScore,
+      totalTokens: this.totalTokens,
+      avgTokensPerTask: this.avgTokensPerTask,
+      totalIterations: this.totalIterations,
+      avgIterationsPerTask: this.avgIterationsPerTask,
+      totalDurationMs: this.totalDurationMs,
+      avgDurationPerTaskMs: this.avgDurationPerTaskMs,
+      totalUniqueFiles: this.totalUniqueFiles,
+      totalDuplicateReads: this.totalDuplicateReads,
+      duplicateReadRatio: this.duplicateReadRatio,
+      totalCompactionEvents: this.totalCompactionEvents,
+      totalTokensSaved: this.totalTokensSaved,
+      successCount: this.successCount,
+      successRate: this.successRate
     };
   }
 }
@@ -291,37 +313,37 @@ export class EvalResults {
 
     for (const [targetName, summary] of Object.entries(summaries)) {
       const comp: Record<string, unknown> = {
-        target_name: targetName,
-        is_baseline: targetName === baselineName
+        targetName,
+        isBaseline: targetName === baselineName
       };
 
       if (baselineSummary.totalTokens > 0) {
         const tokenDiff = summary.totalTokens - baselineSummary.totalTokens;
-        comp.token_diff = tokenDiff;
-        comp.token_diff_pct = (tokenDiff / baselineSummary.totalTokens) * 100;
+        comp.tokenDiff = tokenDiff;
+        comp.tokenDiffPct = (tokenDiff / baselineSummary.totalTokens) * 100;
       } else {
-        comp.token_diff = 0;
-        comp.token_diff_pct = 0;
+        comp.tokenDiff = 0;
+        comp.tokenDiffPct = 0;
       }
 
-      comp.score_diff = summary.avgScore - baselineSummary.avgScore;
+      comp.scoreDiff = summary.avgScore - baselineSummary.avgScore;
 
       if (baselineSummary.totalIterations > 0) {
         const iterDiff = summary.totalIterations - baselineSummary.totalIterations;
-        comp.iteration_diff = iterDiff;
-        comp.iteration_diff_pct = (iterDiff / baselineSummary.totalIterations) * 100;
+        comp.iterationDiff = iterDiff;
+        comp.iterationDiffPct = (iterDiff / baselineSummary.totalIterations) * 100;
       } else {
-        comp.iteration_diff = 0;
-        comp.iteration_diff_pct = 0;
+        comp.iterationDiff = 0;
+        comp.iterationDiffPct = 0;
       }
 
       if (baselineSummary.totalDurationMs > 0) {
         const durDiff = summary.totalDurationMs - baselineSummary.totalDurationMs;
-        comp.duration_diff_ms = durDiff;
-        comp.duration_diff_pct = (durDiff / baselineSummary.totalDurationMs) * 100;
+        comp.durationDiffMs = durDiff;
+        comp.durationDiffPct = (durDiff / baselineSummary.totalDurationMs) * 100;
       } else {
-        comp.duration_diff_ms = 0;
-        comp.duration_diff_pct = 0;
+        comp.durationDiffMs = 0;
+        comp.durationDiffPct = 0;
       }
 
       comparison[targetName] = comp;
@@ -334,12 +356,12 @@ export class EvalResults {
   toDict(): Record<string, unknown> {
     const summaries = this.getSummaries();
     return {
-      run_id: this.runId,
+      runId: this.runId,
       timestamp: this.timestamp.toISOString(),
-      dataset_name: this.datasetName,
-      dataset_version: this.datasetVersion,
-      target_names: this.targetNames,
-      task_ids: this.taskIds,
+      datasetName: this.datasetName,
+      datasetVersion: this.datasetVersion,
+      targetNames: this.targetNames,
+      taskIds: this.taskIds,
       results: Object.fromEntries(
         Object.entries(this.results).map(([target, tasks]) => [
           target,
@@ -377,7 +399,7 @@ export class EvalResults {
 
   toString(): string {
     return (
-      `EvalResults(run_id=${JSON.stringify(this.runId)}, dataset=${JSON.stringify(this.datasetName)}, ` +
+      `EvalResults(runId=${JSON.stringify(this.runId)}, dataset=${JSON.stringify(this.datasetName)}, ` +
       `targets=${this.targetNames.length}, tasks=${this.taskIds.length})`
     );
   }
@@ -391,10 +413,10 @@ export async function loadEvalResults(filePath: string): Promise<EvalResults> {
   const data = JSON.parse(await fs.readFile(filePath, "utf-8"));
 
   const results = new EvalResults({
-    runId: data.run_id,
+    runId: data.runId ?? data.run_id,
     timestamp: new Date(data.timestamp),
-    datasetName: data.dataset_name,
-    datasetVersion: data.dataset_version ?? "",
+    datasetName: data.datasetName ?? data.dataset_name,
+    datasetVersion: data.datasetVersion ?? data.dataset_version ?? "",
     metadata: data.metadata ?? {}
   });
 
@@ -409,10 +431,10 @@ export async function loadEvalResults(filePath: string): Promise<EvalResults> {
         success: resultData.success ?? false,
         error: resultData.error ?? undefined,
         usage: new Usage({
-          durationMs: resultData.duration_ms ?? 0,
+          durationMs: resultData.durationMs ?? resultData.duration_ms ?? 0,
           llmCalls: resultData.iterations ?? 0,
-          tokensInput: resultData.input_tokens ?? 0,
-          tokensOutput: resultData.output_tokens ?? 0
+          tokensInput: resultData.inputTokens ?? resultData.input_tokens ?? 0,
+          tokensOutput: resultData.outputTokens ?? resultData.output_tokens ?? 0
         }),
         metadata: { events: trace.events ?? [] }
       });
@@ -432,11 +454,11 @@ export async function loadEvalResults(filePath: string): Promise<EvalResults> {
           targetName,
           trajectory,
           score,
-          filesRead: resultData.files_read ?? {},
-          uniqueFiles: resultData.unique_files ?? 0,
-          duplicateReads: resultData.duplicate_reads ?? 0,
-          compactionEvents: resultData.compaction_events ?? 0,
-          tokensSaved: resultData.tokens_saved ?? 0,
+          filesRead: resultData.filesRead ?? resultData.files_read ?? {},
+          uniqueFiles: resultData.uniqueFiles ?? resultData.unique_files ?? 0,
+          duplicateReads: resultData.duplicateReads ?? resultData.duplicate_reads ?? 0,
+          compactionEvents: resultData.compactionEvents ?? resultData.compaction_events ?? 0,
+          tokensSaved: resultData.tokensSaved ?? resultData.tokens_saved ?? 0,
           metrics: resultData.metrics ?? {}
         })
       );
@@ -471,27 +493,27 @@ function serializeMessages(messages: Message[]): Array<Record<string, unknown>> 
     };
 
     if (msg instanceof AssistantMessage && msg.toolCalls?.length) {
-      msgDict.tool_calls = msg.toolCalls.map((tc) => ({
-        tool_name: tc.toolName,
+      msgDict.toolCalls = msg.toolCalls.map((tc) => ({
+        toolName: tc.toolName,
         parameters: tc.parameters,
-        call_id: tc.callId
+        callId: tc.callId
       }));
       if (msg.usage) {
         msgDict.usage = {
-          tokens_input: msg.usage.tokensInput,
-          tokens_output: msg.usage.tokensOutput
+          tokensInput: msg.usage.tokensInput,
+          tokensOutput: msg.usage.tokensOutput
         };
       }
     } else if (msg instanceof AssistantMessage && msg.usage) {
       msgDict.usage = {
-        tokens_input: msg.usage.tokensInput,
-        tokens_output: msg.usage.tokensOutput
+        tokensInput: msg.usage.tokensInput,
+        tokensOutput: msg.usage.tokensOutput
       };
     }
 
     if (msg instanceof ToolMessage) {
-      msgDict.tool_call_id = msg.toolCallId;
-      msgDict.tool_name = msg.toolName;
+      msgDict.toolCallId = msg.toolCallId;
+      msgDict.toolName = msg.toolName;
       msgDict.success = msg.success;
       if (msg.error) msgDict.error = msg.error;
       if (Object.keys(msg.metadata).length) msgDict.metadata = msg.metadata;
@@ -516,13 +538,14 @@ function deserializeMessages(serialized: Array<Record<string, any>>): Message[] 
         messages.push(new UserMessage({ content, source }));
       } else if (type === "AssistantMessage") {
         let toolCalls: ToolCallRequest[] | undefined;
-        if (Array.isArray(msgData.tool_calls) && msgData.tool_calls.length) {
-          toolCalls = msgData.tool_calls.map(
+        const serializedToolCalls = msgData.toolCalls ?? msgData.tool_calls;
+        if (Array.isArray(serializedToolCalls) && serializedToolCalls.length) {
+          toolCalls = serializedToolCalls.map(
             (tc: Record<string, any>) =>
               new ToolCallRequest({
-                toolName: tc.tool_name,
+                toolName: tc.toolName ?? tc.tool_name,
                 parameters: tc.parameters ?? {},
-                callId: tc.call_id ?? ""
+                callId: tc.callId ?? tc.call_id ?? ""
               })
           );
         }
@@ -532,8 +555,8 @@ function deserializeMessages(serialized: Array<Record<string, any>>): Message[] 
           new ToolMessage({
             content,
             source,
-            toolCallId: msgData.tool_call_id ?? "",
-            toolName: msgData.tool_name ?? "unknown",
+            toolCallId: msgData.toolCallId ?? msgData.tool_call_id ?? "",
+            toolName: msgData.toolName ?? msgData.tool_name ?? "unknown",
             success: msgData.success ?? true,
             error: msgData.error,
             metadata: msgData.metadata

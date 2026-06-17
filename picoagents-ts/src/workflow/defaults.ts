@@ -39,15 +39,15 @@ export interface WebpageInput {
 }
 
 export interface CollectedOutput {
-  collected_results: string[];
-  total_processed: number;
-  processing_summary: string;
+  collectedResults: string[];
+  totalProcessed: number;
+  processingSummary: string;
 }
 
 export interface ConditionalInput {
   message: string;
   priority?: string;
-  enable_validation?: boolean;
+  enableValidation?: boolean;
 }
 
 const MESSAGE_INPUT_SCHEMA: JsonSchema = {
@@ -74,11 +74,11 @@ const WEBPAGE_INPUT_SCHEMA: JsonSchema = {
 const COLLECTED_OUTPUT_SCHEMA: JsonSchema = {
   type: "object",
   properties: {
-    collected_results: { type: "array", items: { type: "string" } },
-    total_processed: { type: "integer" },
-    processing_summary: { type: "string" }
+    collectedResults: { type: "array", items: { type: "string" } },
+    totalProcessed: { type: "integer" },
+    processingSummary: { type: "string" }
   },
-  required: ["collected_results", "total_processed", "processing_summary"]
+  required: ["collectedResults", "totalProcessed", "processingSummary"]
 };
 
 const CONDITIONAL_INPUT_SCHEMA: JsonSchema = {
@@ -86,7 +86,7 @@ const CONDITIONAL_INPUT_SCHEMA: JsonSchema = {
   properties: {
     message: { type: "string" },
     priority: { type: "string", default: "normal" },
-    enable_validation: { type: "boolean", default: true }
+    enableValidation: { type: "boolean", default: true }
   },
   required: ["message"]
 };
@@ -98,7 +98,8 @@ const HTTP_REQUEST_INPUT_SCHEMA: JsonSchema = {
     method: { type: "string", default: "GET" },
     headers: { type: "object" },
     data: { type: "object" },
-    timeout: { type: "integer", default: 30 }
+    timeout: { type: "integer", default: 30 },
+    verify_ssl: { type: "boolean", default: true }
   },
   required: ["url"]
 };
@@ -106,21 +107,23 @@ const HTTP_REQUEST_INPUT_SCHEMA: JsonSchema = {
 const HTTP_RESPONSE_OUTPUT_SCHEMA: JsonSchema = {
   type: "object",
   properties: {
-    status_code: { type: "integer" },
+    statusCode: { type: "integer" },
     content: { type: "string" },
     headers: { type: "object" },
     url: { type: "string" },
     encoding: { type: "string" },
-    elapsed_time: { type: "number" }
+    elapsedTime: { type: "number" }
   },
-  required: ["status_code", "content", "headers", "url", "elapsed_time"]
+  required: ["statusCode", "content", "headers", "url", "elapsedTime"]
 };
 
 const PICO_AGENT_INPUT_SCHEMA: JsonSchema = {
   type: "object",
   properties: {
     task: { type: "string" },
-    additional_context: { type: "object" }
+    additionalContext: { type: "object" },
+    additional_context: { type: "object" },
+    output_task_messages: { type: "boolean", default: true }
   },
   required: ["task"]
 };
@@ -240,9 +243,9 @@ function createEchoSteps(): EchoStep[] {
           tags: ["collection", "aggregation", "fan-in"]
         },
         mappings: {
-          collected_results: ["static:Results from all parallel processing streams"],
-          total_processed: 3,
-          processing_summary: "result"
+          collectedResults: ["static:Results from all parallel processing streams"],
+          totalProcessed: 3,
+          processingSummary: "result"
         },
         inputSchema: MESSAGE_OUTPUT_SCHEMA,
         outputSchema: COLLECTED_OUTPUT_SCHEMA
@@ -366,28 +369,11 @@ function createAgentTemplate(): PicoAgentStep {
 }
 
 export function getDefaultSteps(): ComponentModel[] {
-  // Step templates are returned as lightweight descriptors. Concrete TS steps
-  // are not all registered serializable components, so we emit a minimal
-  // ComponentModel describing each template.
-  const describe = (step: { stepId: string; constructor: { name: string }; metadata: unknown; inputSchema?: unknown; outputSchema?: unknown }): ComponentModel => ({
-    provider: `picoagents.workflow.${step.constructor.name}`,
-    componentType: "step",
-    version: 1,
-    componentVersion: 1,
-    label: step.constructor.name,
-    config: {
-      stepId: step.stepId,
-      metadata: step.metadata,
-      inputSchema: step.inputSchema,
-      outputSchema: step.outputSchema
-    }
-  });
-
   return [
-    describe(createEchoTemplate()),
-    describe(createHttpTemplate()),
-    describe(createTransformTemplate()),
-    describe(createAgentTemplate())
+    dumpComponent(createEchoTemplate()),
+    dumpComponent(createHttpTemplate()),
+    dumpComponent(createTransformTemplate()),
+    dumpComponent(createAgentTemplate())
   ];
 }
 
@@ -415,6 +401,7 @@ export function createSimpleAgentWorkflow(): ComponentModel {
       url: "url",
       method: "static:GET",
       timeout: 30,
+      verify_ssl: true,
       headers: {},
       data: {}
     },
@@ -437,7 +424,8 @@ export function createSimpleAgentWorkflow(): ComponentModel {
       tags: ["transform"]
     },
     mappings: {
-      task: "static:Please summarize the following HTML content in 2-3 sentences, focusing on the main topic and key information: {content}"
+      task: "static:Please summarize the following HTML content in 2-3 sentences, focusing on the main topic and key information: {content}",
+      output_task_messages: true
     },
     inputSchema: HTTP_RESPONSE_OUTPUT_SCHEMA,
     outputSchema: PICO_AGENT_INPUT_SCHEMA
@@ -542,27 +530,27 @@ export function createConditionalWorkflow(): ComponentModel {
   workflow.setStartStep("receive_conditional");
 
   workflow.addEdge("receive_conditional", "urgent_process", {
-    type: "state_based",
+    type: "stateBased",
     field: "priority",
     operator: "==",
     value: "urgent"
   });
   workflow.addEdge("receive_conditional", "normal_process", {
-    type: "state_based",
+    type: "stateBased",
     field: "priority",
     operator: "==",
     value: "normal"
   });
   workflow.addEdge("receive_conditional", "low_process", {
-    type: "state_based",
+    type: "stateBased",
     field: "priority",
     operator: "==",
     value: "low"
   });
 
   const validationEnabled = {
-    type: "state_based" as const,
-    field: "enable_validation",
+    type: "stateBased" as const,
+    field: "enableValidation",
     operator: "==" as const,
     value: true
   };
@@ -571,8 +559,8 @@ export function createConditionalWorkflow(): ComponentModel {
   workflow.addEdge("low_process", "validation", validationEnabled);
 
   const validationDisabled = {
-    type: "state_based" as const,
-    field: "enable_validation",
+    type: "stateBased" as const,
+    field: "enableValidation",
     operator: "==" as const,
     value: false
   };

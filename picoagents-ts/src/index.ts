@@ -51,6 +51,7 @@ export type {
 } from "./types.js";
 
 export * from "./componentConfig.js";
+export * from "./instructions.js";
 export * from "./middleware.js";
 export * from "./hooks.js";
 export * from "./otel.js";
@@ -64,6 +65,7 @@ export * from "./termination/index.js";
 export * from "./tools/index.js";
 export * from "./workflow/index.js";
 export * from "./eval/index.js";
+export * from "./store/index.js";
 export * from "./webui/index.js";
 
 // Disambiguate names that exist in more than one module (the barrel is flat).

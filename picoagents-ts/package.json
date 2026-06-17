@@ -14,6 +14,10 @@
       "types": "./dist/agents/index.d.ts",
       "import": "./dist/agents/index.js"
     },
+    "./agents/computerUse": {
+      "types": "./dist/agents/computerUse/index.d.ts",
+      "import": "./dist/agents/computerUse/index.js"
+    },
     "./llm": {
       "types": "./dist/llm/index.d.ts",
       "import": "./dist/llm/index.js"
@@ -25,6 +29,10 @@
     "./orchestration": {
       "types": "./dist/orchestration/index.d.ts",
       "import": "./dist/orchestration/index.js"
+    },
+    "./store": {
+      "types": "./dist/store/index.d.ts",
+      "import": "./dist/store/index.js"
     },
     "./webui": {
       "types": "./dist/webui/index.d.ts",
@@ -45,14 +53,17 @@
   },
   "files": [
     "dist",
+    "src/webui/frontend",
     "README.md"
   ],
   "scripts": {
+    "build:webui": "npm --prefix src/webui/frontend run build",
     "build": "tsc -p tsconfig.json && node scripts/copy-webui-assets.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && node --test tests/*.test.mjs"
   },
   "bin": {
+    "picoagents-ts": "./dist/cli.js",
     "picoagentsui-ts": "./dist/webui/cli.js"
   },
   "devDependencies": {
@@ -64,5 +75,13 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "typescript": "^5.8.3"
+  },
+  "peerDependencies": {
+    "playwright": ">=1.40.0"
+  },
+  "peerDependenciesMeta": {
+    "playwright": {
+      "optional": true
+    }
   }
 }

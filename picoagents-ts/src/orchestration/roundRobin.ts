@@ -1,13 +1,32 @@
 import { BaseAgent } from "../agents/index.js";
+import { registerComponent } from "../componentConfig.js";
+import type { ComponentType } from "../componentConfig.js";
 import { Message } from "../messages.js";
 import { AgentResponse } from "../types.js";
-import { BaseOrchestrator, BaseOrchestratorOptions } from "./base.js";
+import {
+  BaseOrchestrator,
+  BaseOrchestratorOptions,
+  loadBaseOrchestratorOptions,
+  serializeBaseOrchestratorConfig
+} from "./base.js";
 
 export class RoundRobinOrchestrator extends BaseOrchestrator {
+  static componentType: ComponentType = "orchestrator";
+  static componentProvider = "picoagents.orchestration.RoundRobinOrchestrator";
+  static componentVersion = 1;
+
   currentAgentIndex = 0;
 
   constructor(options: BaseOrchestratorOptions) {
     super(options);
+  }
+
+  static fromConfig(config: Record<string, unknown> = {}): RoundRobinOrchestrator {
+    return new RoundRobinOrchestrator(loadBaseOrchestratorOptions(config));
+  }
+
+  toConfig(): Record<string, unknown> {
+    return serializeBaseOrchestratorConfig(this);
   }
 
   async selectNextAgent(): Promise<BaseAgent> {
@@ -44,3 +63,5 @@ export class RoundRobinOrchestrator extends BaseOrchestrator {
     };
   }
 }
+
+registerComponent(RoundRobinOrchestrator as any);

@@ -1,7 +1,8 @@
 import { AgentContext } from "../context.js";
 import { CancellationToken } from "../cancellation.js";
 import { CompactionStrategy, normalizeCompaction } from "../compaction.js";
-import { registerComponent } from "../componentConfig.js";
+import { dumpComponent, loadComponent, registerComponent } from "../componentConfig.js";
+import type { ComponentModel } from "../componentConfig.js";
 import { LoopContext } from "../hooks.js";
 import { maybeOtelMiddleware } from "../otel.js";
 import { MiddlewareChain } from "../middleware.js";
@@ -89,7 +90,7 @@ export class Agent extends BaseAgent {
       const store = getDefaultStore();
       if (store) {
         try {
-          await store.saveAgentRun(response);
+          await store.saveAgentRun(this, response);
         } catch {
           // Persistence must never break the run result.
         }
@@ -198,235 +199,254 @@ export class Agent extends BaseAgent {
       let iteration = 0;
 
       while (iteration < this.maxIterations) {
-        cancellationToken?.throwIfCancelled();
-        if (compactionStrategy) llmMessages = compactionStrategy.compact(llmMessages);
-        const tools = this.tools.length ? this.getToolsForLLM() : undefined;
+        try {
+          cancellationToken?.throwIfCancelled();
+          if (compactionStrategy) llmMessages = compactionStrategy.compact(llmMessages);
+          const tools = this.tools.length ? this.getToolsForLLM() : undefined;
 
-        if (verbose) {
-          yield new ModelCallEvent({
-            source: this.name,
-            inputMessages: llmMessages,
-            model: this.modelClient.model
-          });
-        }
+          if (verbose) {
+            yield new ModelCallEvent({
+              source: this.name,
+              inputMessages: llmMessages,
+              model: this.modelClient.model
+            });
+          }
 
-        let completion: ChatCompletionResult;
-        if (streamTokens) {
-          // STREAMING PATH: stream tokens and accumulate the result.
-          // Argument fragments are concatenated per call_id; chunks lacking an
-          // explicit id append to the last seen call_id. Mirrors Python.
-          let streamedContent = "";
-          const accumulatedToolCalls = new Map<
-            string,
-            { id: string; name: string; arguments: string }
-          >();
-          let lastCallId: string | undefined;
-          let streamingUsage = new Usage({ llmCalls: 1 });
+          let completion: ChatCompletionResult;
+          if (streamTokens) {
+            // STREAMING PATH: stream tokens and accumulate the result.
+            // Argument fragments are concatenated per call_id; chunks lacking an
+            // explicit id append to the last seen call_id. Mirrors Python.
+            let streamedContent = "";
+            const accumulatedToolCalls = new Map<
+              string,
+              { id: string; name: string; arguments: string }
+            >();
+            let lastCallId: string | undefined;
+            let streamingUsage = new Usage({ llmCalls: 1 });
 
-          const streamAbort = createAbortSignal(cancellationToken);
-          try {
-            for await (const chunk of this.modelClient.createStream(llmMessages, {
-              tools,
-              outputFormat: this.outputFormat,
-              signal: streamAbort.signal
-            })) {
-              cancellationToken?.throwIfCancelled();
-              if (!chunk.isComplete) {
-                yield chunk;
-                if (chunk.content) streamedContent += chunk.content;
-                if (chunk.toolCallChunk) {
-                  const tc = chunk.toolCallChunk as {
-                    id?: unknown;
-                    function?: { name?: unknown; arguments?: unknown };
-                  };
-                  const chunkId = tc.id != null ? String(tc.id) : undefined;
-                  if (chunkId) lastCallId = chunkId;
-                  const effectiveCallId = chunkId ?? lastCallId;
-                  if (effectiveCallId) {
-                    let entry = accumulatedToolCalls.get(effectiveCallId);
-                    if (!entry) {
-                      entry = { id: effectiveCallId, name: "", arguments: "" };
-                      accumulatedToolCalls.set(effectiveCallId, entry);
-                    }
-                    const fnName = tc.function?.name;
-                    if (typeof fnName === "string" && fnName) entry.name = fnName;
-                    const fnArgs = tc.function?.arguments;
-                    if (typeof fnArgs === "string") {
-                      entry.arguments = mergeToolArguments(entry.arguments, fnArgs);
+            const streamAbort = createAbortSignal(cancellationToken);
+            try {
+              for await (const chunk of this.modelClient.createStream(llmMessages, {
+                tools,
+                outputFormat: this.outputFormat,
+                signal: streamAbort.signal
+              })) {
+                cancellationToken?.throwIfCancelled();
+                if (!chunk.isComplete) {
+                  yield chunk;
+                  if (chunk.content) streamedContent += chunk.content;
+                  if (chunk.toolCallChunk) {
+                    const tc = chunk.toolCallChunk as {
+                      id?: unknown;
+                      function?: { name?: unknown; arguments?: unknown };
+                    };
+                    const chunkId = tc.id != null ? String(tc.id) : undefined;
+                    if (chunkId) lastCallId = chunkId;
+                    const effectiveCallId = chunkId ?? lastCallId;
+                    if (effectiveCallId) {
+                      let entry = accumulatedToolCalls.get(effectiveCallId);
+                      if (!entry) {
+                        entry = { id: effectiveCallId, name: "", arguments: "" };
+                        accumulatedToolCalls.set(effectiveCallId, entry);
+                      }
+                      const fnName = tc.function?.name;
+                      if (typeof fnName === "string" && fnName) entry.name = fnName;
+                      const fnArgs = tc.function?.arguments;
+                      if (typeof fnArgs === "string") {
+                        entry.arguments = mergeToolArguments(entry.arguments, fnArgs);
+                      }
                     }
                   }
+                } else if (chunk.usage) {
+                  streamingUsage = chunk.usage;
                 }
-              } else if (chunk.usage) {
-                streamingUsage = chunk.usage;
+              }
+            } finally {
+              streamAbort.cleanup();
+            }
+
+            const streamedToolCalls: ToolCallRequest[] = [];
+            for (const entry of accumulatedToolCalls.values()) {
+              // Validate name+arguments before building the request.
+              if (!entry.name || !entry.arguments) continue;
+              try {
+                streamedToolCalls.push(
+                  new ToolCallRequest({
+                    toolName: entry.name,
+                    parameters: JSON.parse(entry.arguments),
+                    callId: entry.id
+                  })
+                );
+              } catch {
+                // Skip malformed streamed tool call arguments.
               }
             }
-          } finally {
-            streamAbort.cleanup();
-          }
 
-          const streamedToolCalls: ToolCallRequest[] = [];
-          for (const entry of accumulatedToolCalls.values()) {
-            // Validate name+arguments before building the request.
-            if (!entry.name || !entry.arguments) continue;
+            completion = {
+              message: new AssistantMessage({
+                content: streamedContent,
+                source: "llm",
+                toolCalls: streamedToolCalls.length ? streamedToolCalls : undefined
+              }),
+              usage: new Usage({
+                durationMs: streamingUsage.durationMs,
+                llmCalls: 1,
+                tokensInput: streamingUsage.tokensInput,
+                tokensOutput: streamingUsage.tokensOutput,
+                toolCalls: streamedToolCalls.length,
+                memoryOperations: streamingUsage.memoryOperations,
+                costEstimate: streamingUsage.costEstimate
+              }),
+              model: this.modelClient.model,
+              finishReason: streamedToolCalls.length ? "tool_calls" : "stop"
+            };
+          } else if (useChain) {
+            // NON-STREAMING PATH with middleware: route the model call through the
+            // chain. Events are yielded; the final result is a ChatCompletionResult.
+            // If the chain returns without a result, a middleware paused (approval).
+            let completionResult: ChatCompletionResult | undefined;
+            let paused = false;
+            const modelAbort = createAbortSignal(cancellationToken);
             try {
-              streamedToolCalls.push(
-                new ToolCallRequest({
-                  toolName: entry.name,
-                  parameters: JSON.parse(entry.arguments),
-                  callId: entry.id
-                })
-              );
-            } catch {
-              // Skip malformed streamed tool call arguments.
-            }
-          }
-
-          completion = {
-            message: new AssistantMessage({
-              content: streamedContent,
-              source: "llm",
-              toolCalls: streamedToolCalls.length ? streamedToolCalls : undefined
-            }),
-            usage: new Usage({
-              durationMs: streamingUsage.durationMs,
-              llmCalls: 1,
-              tokensInput: streamingUsage.tokensInput,
-              tokensOutput: streamingUsage.tokensOutput,
-              toolCalls: streamedToolCalls.length,
-              memoryOperations: streamingUsage.memoryOperations,
-              costEstimate: streamingUsage.costEstimate
-            }),
-            model: this.modelClient.model,
-            finishReason: streamedToolCalls.length ? "tool_calls" : "stop"
-          };
-        } else if (useChain) {
-          // NON-STREAMING PATH with middleware: route the model call through the
-          // chain. Events are yielded; the final result is a ChatCompletionResult.
-          // If the chain returns without a result, a middleware paused (approval).
-          let completionResult: ChatCompletionResult | undefined;
-          let paused = false;
-          const modelAbort = createAbortSignal(cancellationToken);
-          try {
-            for await (const item of effectiveChain.executeStream(
-              "model_call",
-              this.name,
-              workingContext,
-              llmMessages,
-              async (data) =>
-                this.modelClient.create(data as Message[], {
-                  tools,
-                  outputFormat: this.outputFormat,
-                  signal: modelAbort.signal
-                }),
-              { model: this.modelClient.model }
-            )) {
-              if (isChatCompletionResult(item)) {
-                completionResult = item;
-              } else {
-                yield item as AgentEvent;
-                if (item instanceof ToolApprovalEvent) {
-                  paused = true;
+              for await (const item of effectiveChain.executeStream(
+                "model_call",
+                this.name,
+                workingContext,
+                llmMessages,
+                async (data) =>
+                  this.modelClient.create(data as Message[], {
+                    tools,
+                    outputFormat: this.outputFormat,
+                    signal: modelAbort.signal
+                  }),
+                { model: this.modelClient.model }
+              )) {
+                if (isChatCompletionResult(item)) {
+                  completionResult = item;
+                } else {
+                  yield item as AgentEvent;
+                  if (item instanceof ToolApprovalEvent) {
+                    paused = true;
+                  }
                 }
               }
+            } finally {
+              modelAbort.cleanup();
             }
-          } finally {
-            modelAbort.cleanup();
+            if (paused) return;
+            if (!completionResult) return; // middleware paused without a result
+            completion = completionResult;
+          } else {
+            const modelAbort = createAbortSignal(cancellationToken);
+            try {
+              completion = await this.modelClient.create(llmMessages, {
+                tools,
+                outputFormat: this.outputFormat,
+                signal: modelAbort.signal
+              });
+            } finally {
+              modelAbort.cleanup();
+            }
           }
-          if (paused) return;
-          if (!completionResult) return; // middleware paused without a result
-          completion = completionResult;
-        } else {
-          const modelAbort = createAbortSignal(cancellationToken);
-          try {
-            completion = await this.modelClient.create(llmMessages, {
-              tools,
-              outputFormat: this.outputFormat,
-              signal: modelAbort.signal
-            });
-          } finally {
-            modelAbort.cleanup();
-          }
-        }
 
-        llmCalls += 1;
-        tokensInput += completion.usage.tokensInput;
-        tokensOutput += completion.usage.tokensOutput;
-        finishReason = completion.finishReason;
+          llmCalls += 1;
+          tokensInput += completion.usage.tokensInput;
+          tokensOutput += completion.usage.tokensOutput;
+          finishReason = completion.finishReason;
 
-        const assistantMessage = new AssistantMessage({
-          content: completion.message.content,
-          source: this.name,
-          toolCalls: completion.message.toolCalls,
-          structuredContent: completion.structuredOutput,
-          usage: completion.usage
-        });
-        lastAssistantMessage = assistantMessage;
-
-        if (!assistantMessage.toolCalls?.length) {
-          yield assistantMessage;
-          messagesYielded.push(assistantMessage);
-        }
-
-        if (verbose) {
-          yield new ModelResponseEvent({
+          const assistantMessage = new AssistantMessage({
+            content: completion.message.content,
             source: this.name,
-            response: assistantMessage.content,
-            hasToolCalls: Boolean(assistantMessage.toolCalls?.length)
+            toolCalls: completion.message.toolCalls,
+            structuredContent: completion.structuredOutput,
+            usage: completion.usage
           });
-        }
+          lastAssistantMessage = assistantMessage;
 
-        workingContext.addMessage(assistantMessage);
-        llmMessages.push(assistantMessage);
-
-        if (assistantMessage.toolCalls?.length) {
-          let approvalNeeded = false;
-          const toolItems =
-            assistantMessage.toolCalls.length > 1
-              ? await this.collectParallelToolCalls(assistantMessage.toolCalls, llmMessages, workingContext, cancellationToken)
-              : await this.collectSequentialToolCalls(assistantMessage.toolCalls, llmMessages, workingContext, cancellationToken);
-
-          for (const item of toolItems) {
-            yield item;
-            if (isMessage(item)) messagesYielded.push(item);
-            if (item instanceof ToolApprovalEvent) approvalNeeded = true;
+          if (!assistantMessage.toolCalls?.length) {
+            yield assistantMessage;
+            messagesYielded.push(assistantMessage);
           }
 
-          if (approvalNeeded) {
-            finishReason = "approval_needed";
-            break;
+          if (verbose) {
+            yield new ModelResponseEvent({
+              source: this.name,
+              response: assistantMessage.content,
+              hasToolCalls: Boolean(assistantMessage.toolCalls?.length)
+            });
           }
 
-          if (!this.summarizeToolResult) break;
-          iteration += 1;
-          continue;
-        }
+          workingContext.addMessage(assistantMessage);
+          llmMessages.push(assistantMessage);
 
-        // No tool calls - check end hooks before stopping. End hooks are
-        // deterministic code; the FIRST hook to return a non-null string injects
-        // it as a UserMessage and resumes the loop (increment restartCount).
-        let shouldContinue = false;
-        if (loopContext) {
-          loopContext.iteration = iteration;
-          loopContext.llmMessages = llmMessages;
-          for (const hook of this.endHooks) {
-            const injection = await hook.onEnd(loopContext);
-            if (injection) {
-              const resumeMsg = new UserMessage({ content: injection, source: "hook" });
-              workingContext.addMessage(resumeMsg);
-              llmMessages.push(resumeMsg);
-              loopContext.restartCount += 1;
-              shouldContinue = true;
-              break; // First hook to inject wins.
+          if (assistantMessage.toolCalls?.length) {
+            let approvalNeeded = false;
+            const toolItems =
+              assistantMessage.toolCalls.length > 1
+                ? this.collectParallelToolCalls(assistantMessage.toolCalls, llmMessages, workingContext, cancellationToken)
+                : this.collectSequentialToolCalls(assistantMessage.toolCalls, llmMessages, workingContext, cancellationToken);
+
+            for await (const item of toolItems) {
+              yield item;
+              if (isMessage(item)) messagesYielded.push(item);
+              if (item instanceof ToolApprovalEvent) approvalNeeded = true;
+            }
+
+            if (approvalNeeded) {
+              finishReason = "approval_needed";
+              break;
+            }
+
+            if (!this.summarizeToolResult) break;
+            iteration += 1;
+            continue;
+          }
+
+          // No tool calls - check end hooks before stopping. End hooks are
+          // deterministic code; the FIRST hook to return a non-null string injects
+          // it as a UserMessage and resumes the loop (increment restartCount).
+          let shouldContinue = false;
+          if (loopContext) {
+            loopContext.iteration = iteration;
+            loopContext.llmMessages = llmMessages;
+            for (const hook of this.endHooks) {
+              const injection = await hook.onEnd(loopContext);
+              if (injection) {
+                const resumeMsg = new UserMessage({ content: injection, source: "hook" });
+                workingContext.addMessage(resumeMsg);
+                llmMessages.push(resumeMsg);
+                loopContext.restartCount += 1;
+                shouldContinue = true;
+                break; // First hook to inject wins.
+              }
             }
           }
-        }
 
-        if (shouldContinue) {
-          iteration += 1;
-          continue;
-        }
+          if (shouldContinue) {
+            iteration += 1;
+            continue;
+          }
 
-        break;
+          break;
+        } catch (error) {
+          if (isCancellationError(error, cancellationToken)) throw error;
+          const message = error instanceof Error ? error.message : String(error);
+          yield new ErrorEvent({
+            source: this.name,
+            errorMessage: message,
+            errorType: error instanceof Error ? error.name : typeof error,
+            isRecoverable: true
+          });
+          const errorMessage = new AssistantMessage({
+            content: `I encountered an error: ${message}`,
+            source: this.name
+          });
+          workingContext.addMessage(errorMessage);
+          yield errorMessage;
+          messagesYielded.push(errorMessage);
+          break;
+        }
       }
 
       if (iteration >= this.maxIterations) finishReason = "max_iterations";
@@ -479,37 +499,73 @@ export class Agent extends BaseAgent {
     }
   }
 
-  private async collectSequentialToolCalls(
+  private async *collectSequentialToolCalls(
     toolCalls: ToolCallRequest[],
     llmMessages: Message[],
     context: AgentContext,
     cancellationToken?: CancellationToken
-  ): Promise<Array<Message | AgentEvent>> {
-    const items: Array<Message | AgentEvent> = [];
+  ): AsyncGenerator<Message | AgentEvent> {
     for (const toolCall of toolCalls) {
       for await (const item of this.executeToolCall(toolCall, llmMessages, context, cancellationToken)) {
-        items.push(item);
+        yield item;
       }
     }
-    return items;
   }
 
-  private async collectParallelToolCalls(
+  private async *collectParallelToolCalls(
     toolCalls: ToolCallRequest[],
     llmMessages: Message[],
     context: AgentContext,
     cancellationToken?: CancellationToken
-  ): Promise<Array<Message | AgentEvent>> {
-    const allItems = await Promise.all(
-      toolCalls.map(async (toolCall) => {
-        const items: Array<Message | AgentEvent> = [];
-        for await (const item of this.executeToolCall(toolCall, llmMessages, context, cancellationToken)) {
-          items.push(item);
+  ): AsyncGenerator<Message | AgentEvent> {
+    type QueueItem =
+      | { kind: "item"; item: Message | AgentEvent }
+      | { kind: "error"; toolCall: ToolCallRequest; error: unknown }
+      | { kind: "done" };
+    const queue = new AsyncToolEventQueue<QueueItem>();
+    let remaining = toolCalls.length;
+
+    for (const toolCall of toolCalls) {
+      void (async () => {
+        try {
+          cancellationToken?.throwIfCancelled();
+          for await (const item of this.executeToolCall(toolCall, llmMessages, context, cancellationToken)) {
+            queue.push({ kind: "item", item });
+          }
+        } catch (error) {
+          queue.push({ kind: "error", toolCall, error });
+        } finally {
+          queue.push({ kind: "done" });
         }
-        return items;
-      })
-    );
-    return allItems.flat();
+      })();
+    }
+
+    while (remaining > 0) {
+      const queued = await queue.shift();
+      if (queued.kind === "done") {
+        remaining -= 1;
+        continue;
+      }
+      if (queued.kind === "item") {
+        yield queued.item;
+        continue;
+      }
+      if (isCancellationError(queued.error, cancellationToken)) {
+        throw queued.error;
+      }
+      const message = new ToolMessage({
+        content: `Tool execution failed: ${queued.error instanceof Error ? queued.error.message : String(queued.error)}`,
+        source: this.name,
+        toolCallId: queued.toolCall.callId,
+        toolName: queued.toolCall.toolName,
+        success: false,
+        error: queued.error instanceof Error ? queued.error.message : String(queued.error)
+      });
+      context.addMessage(message);
+      llmMessages.push(message);
+      yield new ToolCallResponseEvent({ source: this.name, callId: queued.toolCall.callId });
+      yield message;
+    }
   }
 
   private async *executeToolCall(
@@ -569,18 +625,23 @@ export class Agent extends BaseAgent {
 
     try {
       let toolResult: ToolResult | undefined;
-      if (tool.supportsStreaming()) {
-        for await (const item of tool.executeStream(toolCall.parameters, cancellationToken)) {
-          if (item instanceof ToolResult) {
-            toolResult = item;
-            const message = toolResultToMessage(toolResult, toolCall, this.name);
-            context.addMessage(message);
-            llmMessages.push(message);
-            yield message;
-          } else {
-            yield item;
+        if (tool.supportsStreaming()) {
+          for await (const item of tool.executeStream(toolCall.parameters, cancellationToken)) {
+            if (item instanceof ToolResult) {
+              toolResult = item;
+              const message = toolResultToMessage(toolResult, toolCall, this.name);
+              context.addMessage(message);
+              llmMessages.push(message);
+              yield new ToolCallResponseEvent({
+                source: this.name,
+                callId: toolCall.callId,
+                result: toolResult
+              });
+              yield message;
+            } else {
+              yield item;
+            }
           }
-        }
       } else if (this.activeChain && this.activeChain.middlewares.length > 0) {
         // Route the tool call through the middleware chain. Events are yielded;
         // the final result is a ToolResult. If the chain returns without a
@@ -647,22 +708,16 @@ export class Agent extends BaseAgent {
   }
 
   /**
-   * Serialize the agent's primitive configuration. Non-serializable members
-   * (modelClient, tools, memory) are intentionally omitted; the model client is
-   * included as its own dumped component when it supports `dumpComponent`.
+   * Serialize the agent's primitive configuration. Closure-backed tools and
+   * other non-registered components are skipped because they have no portable
+   * JSON representation.
    */
   toConfig(): Record<string, unknown> {
-    let modelClient: unknown;
-    const client = this.modelClient as unknown as {
-      dumpComponent?: () => unknown;
-    };
-    if (typeof client.dumpComponent === "function") {
-      try {
-        modelClient = client.dumpComponent();
-      } catch {
-        modelClient = undefined;
-      }
-    }
+    const modelClient = tryDumpComponent(this.modelClient);
+    const tools = this.tools
+      .map((tool) => tryDumpComponent(tool))
+      .filter((tool): tool is ComponentModel => Boolean(tool));
+    const memory = this.memory ? tryDumpComponent(this.memory) : undefined;
 
     return {
       name: this.name,
@@ -672,17 +727,29 @@ export class Agent extends BaseAgent {
       summarizeToolResult: this.summarizeToolResult,
       requiredTools: [...this.requiredTools],
       exampleTasks: [...this.exampleTasks],
-      modelClient
+      outputFormat: this.outputFormat,
+      modelClient,
+      tools,
+      memory
     };
   }
 
   static fromConfig(config: Record<string, unknown>): Agent {
+    const modelClient = loadIfComponent(config.modelClient ?? config.model_client) as BaseAgentOptions["modelClient"];
+    const tools = Array.isArray(config.tools)
+      ? config.tools.map((tool) => loadIfComponent(tool)).filter(Boolean) as BaseAgentOptions["tools"]
+      : undefined;
+    const memory = loadIfComponent(config.memory) as BaseAgentOptions["memory"];
+
     return new Agent({
       name: String(config.name ?? ""),
       instructions: String(config.instructions ?? ""),
       description: config.description as string | undefined,
-      modelClient: config.modelClient as BaseAgentOptions["modelClient"],
+      modelClient,
+      tools,
+      memory,
       maxIterations: config.maxIterations as number | undefined,
+      outputFormat: config.outputFormat as BaseAgentOptions["outputFormat"],
       summarizeToolResult: config.summarizeToolResult as boolean | undefined,
       requiredTools: config.requiredTools as string[] | undefined,
       exampleTasks: config.exampleTasks as string[] | undefined
@@ -691,6 +758,23 @@ export class Agent extends BaseAgent {
 }
 
 registerComponent(Agent as any);
+
+function tryDumpComponent(value: unknown): ComponentModel | undefined {
+  try {
+    return dumpComponent(value as any);
+  } catch {
+    return undefined;
+  }
+}
+
+function loadIfComponent(value: unknown): unknown {
+  if (isComponentModel(value)) return loadComponent(value);
+  return value;
+}
+
+function isComponentModel(value: unknown): value is ComponentModel {
+  return Boolean(value && typeof value === "object" && "provider" in value && "config" in value);
+}
 
 function isChatCompletionResult(item: unknown): item is ChatCompletionResult {
   return (
@@ -745,4 +829,26 @@ function toolResultToMessage(toolResult: ToolResult, toolCall: ToolCallRequest, 
     error: toolResult.error,
     metadata: toolResult.metadata
   });
+}
+
+class AsyncToolEventQueue<T> {
+  private buffer: T[] = [];
+  private resolvers: Array<(item: T) => void> = [];
+
+  push(item: T): void {
+    const resolve = this.resolvers.shift();
+    if (resolve) {
+      resolve(item);
+      return;
+    }
+    this.buffer.push(item);
+  }
+
+  shift(): Promise<T> {
+    const item = this.buffer.shift();
+    if (item !== undefined) return Promise.resolve(item);
+    return new Promise((resolve) => {
+      this.resolvers.push(resolve);
+    });
+  }
 }

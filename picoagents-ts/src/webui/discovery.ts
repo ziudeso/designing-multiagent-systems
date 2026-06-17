@@ -86,8 +86,8 @@ export class PicoAgentsScanner {
       if (!object || !isValidEntity(object, type)) continue;
       const entity = createEntityInfoFromObject(`${baseId}.${type}`, object, {
         source: "directory",
-        module_path: filePath,
-        has_env: hasEnvFile(filePath)
+        modulePath: filePath,
+        hasEnv: hasEnvFile(filePath)
       });
       if (entity) {
         entities.push(entity);
@@ -101,17 +101,17 @@ export class PicoAgentsScanner {
 export function createEntityInfoFromObject(
   entityId: string,
   entityObject: any,
-  options: { source: EntityInfo["source"]; module_path?: string; has_env?: boolean } = { source: "memory" }
+  options: { source: EntityInfo["source"]; modulePath?: string; hasEnv?: boolean } = { source: "memory" }
 ): Entity | undefined {
   const common = {
     id: entityId,
     name: entityObject.name ?? entityId,
     description: entityObject.description,
     source: options.source,
-    module_path: options.module_path,
-    has_env: options.has_env ?? false,
+    modulePath: options.modulePath,
+    hasEnv: options.hasEnv ?? false,
     tools: [] as string[],
-    example_tasks: entityObject.exampleTasks ?? entityObject.example_tasks ?? []
+    exampleTasks: entityObject.exampleTasks ?? entityObject.example_tasks ?? []
   };
 
   if (isValidEntity(entityObject, "agent")) {
@@ -123,7 +123,7 @@ export function createEntityInfoFromObject(
       type: "agent",
       tools,
       model: entityObject.modelClient?.model ?? entityObject.model_client?.model,
-      memory_type: entityObject.memory ? entityObject.memory.constructor?.name : undefined
+      memoryType: entityObject.memory ? entityObject.memory.constructor?.name : undefined
     } satisfies AgentInfo;
   }
 
@@ -134,8 +134,8 @@ export function createEntityInfoFromObject(
       steps: entityObject.steps instanceof Map
         ? Array.from(entityObject.steps.keys())
         : Object.keys(entityObject.steps ?? {}),
-      input_schema: entityObject.inputSchema ?? entityObject.input_schema,
-      start_step: entityObject.startStepId ?? entityObject.start_step_id ?? entityObject.startStep ?? entityObject.start_step
+      inputSchema: entityObject.inputSchema ?? entityObject.input_schema,
+      startStep: entityObject.startStepId ?? entityObject.start_step_id ?? entityObject.startStep ?? entityObject.start_step
     } satisfies WorkflowInfo;
   }
 
@@ -143,11 +143,11 @@ export function createEntityInfoFromObject(
     return {
       ...common,
       type: "orchestrator",
-      orchestrator_type: entityObject.constructor?.name?.toLowerCase().replace("orchestrator", "") || "custom",
+      orchestratorType: entityObject.constructor?.name?.toLowerCase().replace("orchestrator", "") || "custom",
       agents: Array.isArray(entityObject.agents)
         ? entityObject.agents.map((agent: any) => agent.name ?? String(agent))
         : [],
-      termination_conditions: entityObject.termination
+      terminationConditions: entityObject.termination
         ? [entityObject.termination.constructor?.name ?? "Termination"]
         : []
     } satisfies OrchestratorInfo;

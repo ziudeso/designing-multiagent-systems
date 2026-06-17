@@ -35,6 +35,10 @@ agent_memory/
 !package.json
 !tsconfig.json
 !premium-samples/samples.json
+!picoagents-ts/src/webui/frontend/components.json
+!picoagents-ts/src/webui/frontend/package-lock.json
+!picoagents-ts/src/webui/frontend/package.json
+!picoagents-ts/src/webui/frontend/tsconfig*.json
 # C extensions
 *.so
 
@@ -47,6 +51,8 @@ downloads/
 eggs/
 .eggs/
 lib/
+!picoagents-ts/src/webui/frontend/src/lib/
+!picoagents-ts/src/webui/frontend/src/lib/**
 lib64/
 parts/
 sdist/

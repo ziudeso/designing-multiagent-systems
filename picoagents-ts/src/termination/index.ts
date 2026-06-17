@@ -1,4 +1,6 @@
 import { CancellationToken } from "../cancellation.js";
+import { dumpComponent, loadComponent, registerComponent } from "../componentConfig.js";
+import type { ComponentModel, ComponentType } from "../componentConfig.js";
 import { AssistantMessage, Message, ToolMessage } from "../messages.js";
 import { StopMessage } from "../types.js";
 
@@ -48,12 +50,24 @@ export abstract class BaseTermination {
 }
 
 export class MaxMessageTermination extends BaseTermination {
+  static componentType: ComponentType = "termination";
+  static componentProvider = "picoagents.termination.MaxMessageTermination";
+  static componentVersion = 1;
+
   maxMessages: number;
   messageCount = 0;
 
   constructor(maxMessages: number) {
     super();
     this.maxMessages = maxMessages;
+  }
+
+  static fromConfig(config: Record<string, unknown> = {}): MaxMessageTermination {
+    return new MaxMessageTermination(Number(config.maxMessages ?? config.max_messages ?? 1));
+  }
+
+  toConfig(): Record<string, unknown> {
+    return { maxMessages: this.maxMessages };
   }
 
   check(newMessages: Message[]): StopMessage | undefined {
@@ -77,6 +91,10 @@ export class MaxMessageTermination extends BaseTermination {
 }
 
 export class TextMentionTermination extends BaseTermination {
+  static componentType: ComponentType = "termination";
+  static componentProvider = "picoagents.termination.TextMentionTermination";
+  static componentVersion = 1;
+
   text: string;
   caseSensitive: boolean;
   private searchText: string;
@@ -86,6 +104,17 @@ export class TextMentionTermination extends BaseTermination {
     this.text = text;
     this.caseSensitive = caseSensitive;
     this.searchText = caseSensitive ? text : text.toLowerCase();
+  }
+
+  static fromConfig(config: Record<string, unknown> = {}): TextMentionTermination {
+    return new TextMentionTermination(
+      String(config.text ?? ""),
+      Boolean(config.caseSensitive ?? config.case_sensitive ?? false)
+    );
+  }
+
+  toConfig(): Record<string, unknown> {
+    return { text: this.text, caseSensitive: this.caseSensitive };
   }
 
   check(newMessages: Message[]): StopMessage | undefined {
@@ -104,12 +133,24 @@ export class TextMentionTermination extends BaseTermination {
 }
 
 export class TokenUsageTermination extends BaseTermination {
+  static componentType: ComponentType = "termination";
+  static componentProvider = "picoagents.termination.TokenUsageTermination";
+  static componentVersion = 1;
+
   maxTokens: number;
   totalTokens = 0;
 
   constructor(maxTokens: number) {
     super();
     this.maxTokens = maxTokens;
+  }
+
+  static fromConfig(config: Record<string, unknown> = {}): TokenUsageTermination {
+    return new TokenUsageTermination(Number(config.maxTokens ?? config.max_tokens ?? 1));
+  }
+
+  toConfig(): Record<string, unknown> {
+    return { maxTokens: this.maxTokens };
   }
 
   check(newMessages: Message[]): StopMessage | undefined {
@@ -131,6 +172,10 @@ export class TokenUsageTermination extends BaseTermination {
 }
 
 export class TimeoutTermination extends BaseTermination {
+  static componentType: ComponentType = "termination";
+  static componentProvider = "picoagents.termination.TimeoutTermination";
+  static componentVersion = 1;
+
   maxDurationSeconds: number;
   startTime: number;
 
@@ -138,6 +183,14 @@ export class TimeoutTermination extends BaseTermination {
     super();
     this.maxDurationSeconds = maxDurationSeconds;
     this.startTime = Date.now();
+  }
+
+  static fromConfig(config: Record<string, unknown> = {}): TimeoutTermination {
+    return new TimeoutTermination(Number(config.maxDurationSeconds ?? config.max_duration_seconds ?? 1));
+  }
+
+  toConfig(): Record<string, unknown> {
+    return { maxDurationSeconds: this.maxDurationSeconds };
   }
 
   check(_newMessages: Message[]): StopMessage | undefined {
@@ -161,11 +214,23 @@ export class TimeoutTermination extends BaseTermination {
 }
 
 export class HandoffTermination extends BaseTermination {
+  static componentType: ComponentType = "termination";
+  static componentProvider = "picoagents.termination.HandoffTermination";
+  static componentVersion = 1;
+
   target: string;
 
   constructor(target: string) {
     super();
     this.target = target;
+  }
+
+  static fromConfig(config: Record<string, unknown> = {}): HandoffTermination {
+    return new HandoffTermination(String(config.target ?? ""));
+  }
+
+  toConfig(): Record<string, unknown> {
+    return { target: this.target };
   }
 
   check(newMessages: Message[]): StopMessage | undefined {
@@ -192,11 +257,23 @@ export class HandoffTermination extends BaseTermination {
 }
 
 export class FunctionCallTermination extends BaseTermination {
+  static componentType: ComponentType = "termination";
+  static componentProvider = "picoagents.termination.FunctionCallTermination";
+  static componentVersion = 1;
+
   functionName: string;
 
   constructor(functionName: string) {
     super();
     this.functionName = functionName;
+  }
+
+  static fromConfig(config: Record<string, unknown> = {}): FunctionCallTermination {
+    return new FunctionCallTermination(String(config.functionName ?? config.function_name ?? ""));
+  }
+
+  toConfig(): Record<string, unknown> {
+    return { functionName: this.functionName };
   }
 
   check(newMessages: Message[]): StopMessage | undefined {
@@ -253,6 +330,10 @@ export class CancellationTermination extends BaseTermination {
 }
 
 export class CompositeTermination extends BaseTermination {
+  static componentType: ComponentType = "termination";
+  static componentProvider = "picoagents.termination.CompositeTermination";
+  static componentVersion = 1;
+
   conditions: BaseTermination[];
   mode: "any" | "all";
 
@@ -260,6 +341,21 @@ export class CompositeTermination extends BaseTermination {
     super();
     this.conditions = conditions;
     this.mode = mode;
+  }
+
+  static fromConfig(config: Record<string, unknown> = {}): CompositeTermination {
+    const conditions = Array.isArray(config.conditions)
+      ? config.conditions.map((condition) => loadComponent(condition as ComponentModel) as unknown as BaseTermination)
+      : [];
+    const mode = config.mode === "all" ? "all" : "any";
+    return new CompositeTermination(conditions, mode);
+  }
+
+  toConfig(): Record<string, unknown> {
+    return {
+      conditions: this.conditions.map((condition) => dumpComponent(condition as unknown as { toConfig(): Record<string, unknown> })),
+      mode: this.mode
+    };
   }
 
   check(newMessages: Message[]): StopMessage | undefined {
@@ -311,3 +407,11 @@ export class CompositeTermination extends BaseTermination {
     return new CompositeTermination([...this.conditions, other], "all");
   }
 }
+
+registerComponent(MaxMessageTermination as any);
+registerComponent(TextMentionTermination as any);
+registerComponent(TokenUsageTermination as any);
+registerComponent(TimeoutTermination as any);
+registerComponent(HandoffTermination as any);
+registerComponent(FunctionCallTermination as any);
+registerComponent(CompositeTermination as any);

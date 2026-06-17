@@ -13,7 +13,8 @@ import {
   InvalidRequestError,
   RateLimitError,
   StructuredOutputFormat,
-  normalizeOutputFormat
+  normalizeOutputFormat,
+  parseStructuredOutput
 } from "./base.js";
 import { fetchWithRetries } from "./http.js";
 
@@ -112,11 +113,7 @@ export class OpenAIChatCompletionClient extends BaseChatCompletionClient impleme
 
     let structuredOutput: unknown;
     if (outputFormat && typeof assistantContent === "string" && assistantContent.trim()) {
-      try {
-        structuredOutput = JSON.parse(assistantContent);
-      } catch {
-        structuredOutput = undefined;
-      }
+      structuredOutput = parseStructuredOutput(assistantContent, outputFormat);
     }
 
     return {
